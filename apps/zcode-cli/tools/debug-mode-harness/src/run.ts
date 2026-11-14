@@ -25,9 +25,13 @@
    常用参数：--calls=N（默认 30） --model=ID --timeout-ms=每调用超时（默认 240000）
    --debug-mode=0|1（默认 1） --out-dir=DIR（默认 ./runs/<时间戳>）
    --key-env=VARNAME（API key 的 env 名，默认依次取 DEBUG_HARNESS_API_KEY →
-   ZCODE_DESKTOP_OPENROUTER_FREE_KEY → OPENROUTER_API_KEY）。 */
+   ZCODE_DESKTOP_OPENROUTER_FREE_KEY → OPENROUTER_API_KEY）。
 
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+   分片执行（沙箱里 bash 调用有时限、进程不能常驻）：--max-wall-ms=M 到点后
+   做完当前调用就收尾写报告；--resume 复用 out-dir 里已有的 ledger.jsonl，
+   跳过已记录的调用号续跑——多片拼接后报告覆盖全部调用。 */
+
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -63,6 +67,10 @@ interface Argv {
   debugMode: boolean;
   outDir: string;
   apiKey: string;
+  /** 0 = 不限；>0 到点后做完当前调用即收尾（分片执行）。 */
+  maxWallMs: number;
+  /** 复用 out-dir 的 ledger.jsonl 续跑（跳过已记录调用号）。 */
+  resume: boolean;
 }
 
 function parseArgv(): Argv {
@@ -70,7 +78,9 @@ function parseArgv(): Argv {
   const flag = (name: string): string | undefined => {
     const prefix = `--${name}=`;
     const hit = args.find((a) => a.startsWith(prefix));
-    return hit === undefined ? undefined : hit.slice(prefix.length);
+    if (hit !== undefined) return hit.slice(prefix.length);
+    // 裸旗标（--resume 不带值）视为 "1"。
+    return args.includes(`--${name}`) ? "1" : undefined;
   };
   const keyEnv =
     flag("key-env") ??
@@ -89,6 +99,8 @@ function parseArgv(): Argv {
     debugMode: (flag("debug-mode") ?? "1") !== "0",
     outDir: flag("out-dir") ?? `runs/${new Date().toISOString().replaceAll(":", "-")}`,
     apiKey,
+    maxWallMs: Number(flag("max-wall-ms") ?? 0),
+    resume: (flag("resume") ?? "0") !== "0",
   };
 }
 
@@ -233,12 +245,35 @@ async function main() {
   const registry = buildRegistry(argv.apiKey, argv.baseUrl, argv.model);
   const directory = await mkdtemp(join(tmpdir(), "zcode-debug-harness-"));
   const startedAt = nowIso();
+
+  // 分片续跑：复用 ledger 里已记录的调用，只补剩下的。
+  const records: CallRecord[] = [];
+  if (argv.resume) {
+    try {
+      const previous = await readFile(ledgerPath, "utf8");
+      // 同一调用号可能因旧版分片 bug 重复，保留最后一条。
+      const byCall = new Map<number, CallRecord>();
+      for (const line of previous.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const record = JSON.parse(trimmed) as CallRecord;
+        byCall.set(record.call, record);
+      }
+      records.push(...[...byCall.values()]);
+      const done = records.map((r) => r.call).sort((a, b) => a - b).join(",");
+      process.stdout.write(`[harness] resume：已复用 ${records.length} 条记录（calls ${done}）\n`);
+    } catch {
+      process.stdout.write("[harness] resume：无既有 ledger，从 call 1 全量开始\n");
+    }
+  }
+  const completedCalls = new Set(records.map((r) => r.call));
+
   process.stdout.write(
     `[harness] ZCODE_DEBUG_MODE=${process.env.ZCODE_DEBUG_MODE} model=${argv.model} calls=${argv.calls} ` +
-      `perCallTimeout=${argv.timeoutMs}ms\n[harness] ledger: ${ledgerPath}\n`,
+      `perCallTimeout=${argv.timeoutMs}ms${argv.maxWallMs ? ` maxWall=${argv.maxWallMs}ms` : ""}\n[harness] ledger: ${ledgerPath}\n`,
   );
 
-  const records: CallRecord[] = [];
+  const wallBudgetStarted = performance.now();
   let app: Awaited<ReturnType<typeof createZCodeApp>> | undefined;
   try {
     app = await createZCodeApp({
@@ -268,6 +303,12 @@ async function main() {
 
     for (let call = 1; call <= argv.calls; call += 1) {
       if (globalAbort.signal.aborted) break;
+      if (completedCalls.has(call)) continue;
+      // 墙钟预算：到点后不再开新调用（当前调用做完再收尾），下一片 --resume 续跑。
+      if (argv.maxWallMs > 0 && performance.now() - wallBudgetStarted > argv.maxWallMs) {
+        process.stdout.write(`[harness] wall 预算用完（${argv.maxWallMs}ms），做完前收尾——用 --resume 续跑\n`);
+        break;
+      }
       const prompt = promptForCall(call);
       const record: CallRecord = {
         call,
@@ -373,6 +414,8 @@ async function main() {
     }
   }
 
+  // 分片续跑后 records 可能乱序；统一按调用号排序再统计。
+  records.sort((a, b) => a.call - b.call);
   const counts: Record<CallRecord["outcome"], number> = {
     success: 0,
     retry: 0,
