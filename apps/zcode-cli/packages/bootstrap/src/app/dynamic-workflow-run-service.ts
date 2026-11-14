@@ -295,6 +295,11 @@ export interface DynamicWorkflowRunServiceDeps {
    */
   driverClock?: AgentRuntimeWorkflowDriverDeps["clock"];
   /**
+   * ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）预解析 flag，原样转交 driver：
+   * true 时配额类停止不再 stopRun，改走患者重驱。缺席即 false（默认行为逐字不变）。
+   */
+  debugMode?: boolean;
+  /**
    * 按内联规则铸一份草稿（docs/dynamic-workflow/launch.md「The draft after a fill」）：一次补全
    * 落在一个没有草稿的 run 上时，有效脚本要有个家。规则（slug、`-2`/`-3` 顺延、独占创建、目录
    * 的 `.gitignore`）只在工具层有一份实现，宿主装配时注入，本服务不复制它。写不成回 `undefined`

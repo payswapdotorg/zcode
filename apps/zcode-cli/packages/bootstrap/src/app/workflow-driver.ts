@@ -324,6 +324,7 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
       actor,
       actorName: effectiveActorName(persona),
       transientAttempts: 0,
+      debugQuotaRedrives: 0,
     };
     try {
       if (seed !== undefined) {
@@ -374,6 +375,7 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
     // 它本来就一直在工作，中途没有空过。
     this.deps.seatGate?.askStarted(refToString(state.actor), instance);
     state.transientAttempts = 0;
+    state.debugQuotaRedrives = 0;
     state.cancelRedrive?.();
     state.cancelRedrive = undefined;
     this.instanceToSession.set(refToString(instance), state);

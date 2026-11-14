@@ -361,6 +361,71 @@ describe("workflow concurrency governor — 桶与闸门（决策 34）", () => 
   });
 });
 
+describe("workflow concurrency governor — ZCODE_DEBUG_MODE 冷却绕过（docs/design/v2/debug-mode.md）", () => {
+  function makeDebugGovernor(defaultConcurrency = CEILING) {
+    const clock = fakeClock();
+    const governor = createWorkflowConcurrencyGovernor({
+      defaultConcurrency,
+      now: clock.now,
+      schedule: clock.schedule,
+      ignoreThrottleCooldowns: true,
+    });
+    const admitNow = (runId = "runA", key = KEY_A): ModelRequestAdmissionTicket => {
+      const ticket = governor.tryAdmit(runId, key);
+      if (ticket === undefined) throw new Error("tryAdmit unexpectedly missed");
+      return ticket;
+    };
+    return { clock, governor, admitNow };
+  }
+
+  it("429+Retry-After 不再设冷却：等待者立即放行，cap 的 AIMD 降半照旧", async () => {
+    const { governor, admitNow } = makeDebugGovernor();
+    const first = admitNow();
+    outcome.throttled429(first, 20_000);
+    const snapshot = governor.snapshot(KEY_A)!;
+    // cap 照旧降（AIMD 语义不变）……
+    expect(snapshot.cap).toBe(6);
+    // ……但闸门不再被 Retry-After 冻住。
+    expect(snapshot.cooldownUntil).toBeUndefined();
+    const next = governor.tryAdmit("A", KEY_A);
+    expect(next).toBeDefined();
+    const waiting = track(governor.admit("B", KEY_A, new AbortController().signal));
+    await flush();
+    expect(waiting.ticket).toBeDefined();
+  });
+
+  it("不可重试的 rate_limited 失败同样不设冷却（cap 仍降）", async () => {
+    const { governor, admitNow } = makeDebugGovernor();
+    const first = admitNow();
+    first.publish(
+      statusEvent({
+        type: "model_request_failed",
+        reason: "rate_limited",
+        retryable: false,
+        message: "quota",
+        retryAfterMs: 3_600_000,
+      }),
+    );
+    const snapshot = governor.snapshot(KEY_A)!;
+    expect(snapshot.cap).toBe(6);
+    expect(snapshot.cooldownUntil).toBeUndefined();
+    expect(governor.tryAdmit("A", KEY_A)).toBeDefined();
+  });
+
+  it("回归：默认装配照旧冷却冻结（上面「Retry-After 冷却冻结」一族用例已钉住，这里补断言单例默认不带绕过）", async () => {
+    const clock = fakeClock();
+    const governor = createWorkflowConcurrencyGovernor({
+      defaultConcurrency: CEILING,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    const ticket = governor.tryAdmit("A", KEY_A)!;
+    outcome.throttled429(ticket, 20_000);
+    expect(governor.snapshot(KEY_A)?.cooldownUntil).toBe(clock.now() + 20_000);
+    expect(governor.tryAdmit("A", KEY_A)).toBeUndefined();
+  });
+});
+
 describe("workflow concurrency governor — 主代理 subagent 池（docs/dynamic-workflow/concurrency.md「Where the port is bound」）", () => {
   // 修复原因：subagent 曾继承父的 observer，并行的 Agent 调用既不排队也不看 Retry-After，
   // 是线上 1302 风暴的最大来源。

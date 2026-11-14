@@ -15,6 +15,7 @@
 // 所以需要一个 setTimeout（可注入，unref）。
 
 import { resolveWorkflowModelFailurePolicy } from "@zcode/adapters/model";
+import { isZCodeDebugModeEnabled } from "@zcode/shared";
 import {
   ModelErrorCode,
   type ModelNetworkStatusEvent,
@@ -86,6 +87,12 @@ interface WorkflowConcurrencyGovernorOptions {
   now?: () => number;
   /** 定时器（可注入）：冷却到期唤醒等待者。返回取消函数。 */
   schedule?: (callback: () => void, delayMs: number) => () => void;
+  /**
+   * ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）：true 时限流类信号**不再携带
+   * Retry-After 进控制器**——即不设置冷却（冷却会冻住整个桶，长达额度窗口的 Retry-After
+   * 会让 workflow 子代理在闸门上饿死）。cap 的 AIMD 降半/退避语义照旧；默认 false 逐字不变。
+   */
+  ignoreThrottleCooldowns?: boolean;
 }
 
 /** 限流类 retry 原因 → 控制器的 throttled 信号。 */
@@ -144,6 +151,9 @@ export function createWorkflowConcurrencyGovernor(
 ): WorkflowConcurrencyGovernor {
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? defaultSchedule;
+  // ZCODE_DEBUG_MODE：true 时不把 Retry-After 喂给 throttled —— 控制器带 undefined 就不会
+  // 设置冷却（见 concurrency.ts 的 throttled），闸门永远开着，只有 cap 的 AIMD 起落。
+  const throttleCooldownMs = options.ignoreThrottleCooldowns === true ? undefined : <T>(ms: T) => ms;
   const buckets = new Map<string, Bucket>();
   /** run 级订阅（不按 key）：扇出时按桶的 engaged 集合过滤。 */
   const listeners = new Map<string, Set<(change: ConcurrencyChange) => void>>();
@@ -274,7 +284,7 @@ export function createWorkflowConcurrencyGovernor(
                   at,
                   epoch,
                   reason as ConcurrencyThrottleReason,
-                  event.retryAfterMs,
+                  throttleCooldownMs === undefined ? undefined : event.retryAfterMs,
                 ),
               );
               return;
@@ -298,7 +308,12 @@ export function createWorkflowConcurrencyGovernor(
             // 只当「链结束」会让 cap 从未因它降过。
             if (event.reason === "rate_limited") {
               settle((at) =>
-                bucket.controller.throttled(at, epoch, "rate_limited", event.retryAfterMs),
+                bucket.controller.throttled(
+                  at,
+                  epoch,
+                  "rate_limited",
+                  throttleCooldownMs === undefined ? undefined : event.retryAfterMs,
+                ),
               );
               return;
             }
@@ -498,11 +513,15 @@ let processGovernor: WorkflowConcurrencyGovernor | undefined;
 
 /**
  * 进程级单例（决策 5）：默认并发在首次取用时算一次；此后每个 app（会话）的主 runtime 挂它的
- * observer，run service 拿同一个端口给 driver。
+ * observer，run service 拿同一个端口给 driver。ZCODE_DEBUG_MODE=1 时治理器跳过 429 冷却
+ * （spec：docs/design/v2/debug-mode.md）。
  */
-export function getWorkflowConcurrencyGovernor(): WorkflowConcurrencyGovernor {
+export function getWorkflowConcurrencyGovernor(
+  env: Record<string, string | undefined> = process.env,
+): WorkflowConcurrencyGovernor {
   processGovernor ??= createWorkflowConcurrencyGovernor({
     defaultConcurrency: resolveWorkflowDefaultConcurrency(),
+    ...(isZCodeDebugModeEnabled(env) ? { ignoreThrottleCooldowns: true } : {}),
   });
   return processGovernor;
 }

@@ -316,6 +316,12 @@ export type TuiOptions = {
   theme?: UiThemePreference;
   initialThemeMode?: UiThemeMode;
   developerMode?: boolean;
+  /**
+   * ZCODE_DEBUG_MODE（spec：apps/zcode-cli/docs/design/v2/debug-mode.md）预解析 flag：
+   * true 时限流类 TurnError 不追加转写错误行、不清空排队输入显示（与 runtime 侧「不停队列」
+   * 同步）。CLI 装配时从 env 读一次；缺席即 false，默认行为逐字不变。
+   */
+  debugMode?: boolean;
   version?: string;
   workspaceDirectory?: string;
   workspaceGitBranch?: string;

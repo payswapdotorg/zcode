@@ -5,10 +5,12 @@ import {
   ModelRetryReason,
   ModelTransportKind as ModelTransportKindValue,
 } from "@zcode/contracts";
+import { isZCodeDebugModeEnabled } from "@zcode/shared";
 import { classifyModelFailure, inspectProviderFailure } from "./failure-classifier.js";
 import type { ClassifiedModelFailure } from "./failure-classifier.js";
 import { getResponseHeaders, unwrapRetryError } from "./failure-inspection.js";
 import { offPeakTicketExpiredMessage, resolveOffPeakFailureDecision } from "./offpeak-retry.js";
+import { debugQuotaProbeDelayMs, isDebugQuotaStopFailure } from "./debug-quota-retry.js";
 import { AiSdkModelAdapterError } from "./errors.js";
 import { resolveAnthropicRequestMetadataUserId } from "./anthropic-request-metadata.js";
 import { createGenerateTextOptions } from "./runner-options.js";
@@ -103,6 +105,10 @@ export async function runGenerateText(input: {
   let emptyCompletionRetryCount = 0;
   // 不认识的业务码在本次请求里连续出现的次数：workflow 策略表据此停下，见 workflow-model-failure-policy.ts。
   let unrecognizedCodeStreak = 0;
+  // ZCODE_DEBUG_MODE（默认 false，一次请求读一次）：配额/限流类停止改走患者探测（见 debug-quota-retry.ts）。
+  const debugMode = isZCodeDebugModeEnabled(input.env);
+  // 本次请求里连续配额停止的次数：60s→10min→…→1h 升梯的输入。
+  let debugQuotaProbeCount = 0;
 
   for (
     let attempt = 1;
@@ -396,6 +402,12 @@ export async function runGenerateText(input: {
         failure,
         providerCode,
       );
+      // ZCODE_DEBUG_MODE：非 off-peak 的配额/限流类停止改走患者探测——预算豁免、
+      // 60s→10min→1h 间距、原地无限重试（见 debug-quota-retry.ts 的曲线论证）。
+      // off-peak 协议在时让位（它有自己的排队探测与过号语义）。
+      const debugQuotaProbe =
+        debugMode && offPeak === null && isDebugQuotaStopFailure(failure, providerCode);
+      if (debugQuotaProbe) debugQuotaProbeCount += 1;
       const responseHeaders = sanitizeModelNetworkHeaders(
         getResponseHeaders(unwrapRetryError(error)),
       );
@@ -418,9 +430,16 @@ export async function runGenerateText(input: {
       const canRetryWithFailurePolicy =
         offPeak?.kind === "queued"
           ? true
-          : retryBudgetAllows(retryBudget, retryBudgetAttempt, input.retry.maxAttempts) &&
-            // workflow 流量（无上限预算）读策略表而不是分类器的 retryable；有界预算逐字不变。
-            retryAllowedByFailurePolicy(failure, retryBudget, providerCode, unrecognizedCodeStreak);
+          : debugQuotaProbe
+            ? true
+            : retryBudgetAllows(retryBudget, retryBudgetAttempt, input.retry.maxAttempts) &&
+              // workflow 流量（无上限预算）读策略表而不是分类器的 retryable；有界预算逐字不变。
+              retryAllowedByFailurePolicy(
+                failure,
+                retryBudget,
+                providerCode,
+                unrecognizedCodeStreak,
+              );
       const retryWithAuth = authRetry.claim(error, options === undefined);
       if (retryWithAuth)
         statusContext = {
@@ -529,7 +548,9 @@ export async function runGenerateText(input: {
       const delayMs =
         offPeak?.kind === "queued"
           ? offPeak.delayMs
-          : calculateRetryDelay(input.retry, retryBudgetAttempt, failure.retryAfterMs);
+          : debugQuotaProbe
+            ? debugQuotaProbeDelayMs(debugQuotaProbeCount)
+            : calculateRetryDelay(input.retry, retryBudgetAttempt, failure.retryAfterMs);
       logRetryDelayDecision({
         attempt,
         canRetry,
@@ -586,8 +607,8 @@ export async function runGenerateText(input: {
           errorPhase: "connect",
         });
       }
-      if (offPeak?.kind === "queued") {
-        // 排队等待不消耗重试预算：回退计数让 for 自增后原地重试，无限探测。
+      if (offPeak?.kind === "queued" || debugQuotaProbe) {
+        // 排队等待/患者探测不消耗重试预算：回退计数让 for 自增后原地重试，无限探测。
         attempt -= 1;
       }
     } finally {

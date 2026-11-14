@@ -91,6 +91,8 @@
 
 常用运行变量包括 `ZCODE_STORAGE_DIR`、`ZCODE_SESSION_DB_PATH`、`ZCODE_LOG_DIR`、`ZCODE_LOG_CONSOLE=1`、`ZCODE_HTTP_PROXY`、`ZCODE_NO_PROXY`、`ZCODE_AGENT_CA_CERT` 和 `ZCODE_MAX_TOOL_CONCURRENCY`。`ZCODE_LOG_LEVEL` 不是受支持的日志级别设置。
 
+`ZCODE_DEBUG_MODE=1|true|on`（默认关闭，见 [ZCODE_DEBUG_MODE 设计](../design/v2/debug-mode.md)）是本机开发/自动化测试专用的韧性开关：开启后限流/配额类失败按患者探测（60s 起、连续失败按 10min→1h 升梯，不消耗重试预算）重试而非停止、workflow 并发治理器不再按 Retry-After 冷却冻结准入、限额警告文案（「额度用尽」「将于…重置」「充值或升级」）被压下。它**不会**绕过真实的服务端配额，只改变客户端对配额错误的反应；不适合普通使用，未设置时行为与默认逐字相同。注意它与 `ZCODE_DEBUG`（desktop 主进程的 inspect 端口）不同名也不同义。
+
 CLI 会从有效工作目录向上查找 `.env`，既有环境变量不被覆盖。评测工作区及其父目录不要遗留意外的 `.env`。使用 `network.httpProxy` 或 `ZCODE_HTTP_PROXY` 配置 CLI 网络；不要假设调用者的所有标准代理、证书或 telemetry 变量会原样进入运行时。
 
 完整隔离需要同时考虑用户目录、数据基目录、工作目录和已有环境变量，见[批量任务](13-automation.md)。

@@ -10,6 +10,7 @@ import type {
   DynamicWorkflowRunHole,
   DynamicWorkflowRunPendingQuestion,
 } from "@zcode/contracts";
+import { isZCodeDebugModeEnabled } from "@zcode/shared";
 import { escapeXml, truncateTaskNotification } from "./notification.js";
 
 /** run 中通知共用的抬头：让模型不把系统通知读成用户输入。 */
@@ -65,6 +66,14 @@ export function formatWorkflowProviderStopError(
           `Switching the session to another model usually clears this; ${resume}. If it stops again with the same code, show the raw message to the user.`,
         ];
       case "quota":
+        // ZCODE_DEBUG_MODE：压下限额警告文案（「额度用尽/上限已到」「将于…重置」「充值或升级」），
+        // 换成中性两句——停止事实仍在，但不再向模型/用户推销窗口/账单状态。flag off 逐字不变。
+        if (isZCodeDebugModeEnabled()) {
+          return [
+            `${provider} interrupted subagent ${subagent}${phase}'s request (code ${code}).`,
+            `ZCode is running with ZCODE_DEBUG_MODE: limit errors are retried patiently, not treated as terminal. ${resume} if this run stays stopped; finished steps are kept.`,
+          ];
+        }
         return details.resetAt === undefined
           ? [
               `${provider} reports the user's quota is exhausted (code ${code}).`,

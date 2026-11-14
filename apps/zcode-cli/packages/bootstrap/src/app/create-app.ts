@@ -52,7 +52,7 @@ import {
   type ExecutionShellSelection,
   type MessageId,
 } from "@zcode/contracts";
-import { isRemoteWorkspaceIdentity, resolveZCodeRuntimeEnv } from "@zcode/shared";
+import { isRemoteWorkspaceIdentity, isZCodeDebugModeEnabled, resolveZCodeRuntimeEnv } from "@zcode/shared";
 import {
   ZCODE_ATTACHMENT_FAULT_CODES,
   ZCodeAttachmentFaultError,
@@ -782,7 +782,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     // driver（每个 actor runtime 一个请求级准入端口）；主 runtime 挂它的 observer（下面 deps）——
     // 不排队、不看冷却，但计入在飞并喂信号。进程级单例——配额本就在账号上，不按会话分。
     // 不再经 adapter 级 addStatusSink 喂信号：同一事件只能沿 ticket 喂一次。
-    const workflowConcurrencyGovernor = getWorkflowConcurrencyGovernor();
+    const workflowConcurrencyGovernor = getWorkflowConcurrencyGovernor(options.env);
     modelAdapter.setModelIoFullRetentionEnabled(options.modelIoFullRetentionEnabled ?? false);
     providerModelRuntime = new ApiProviderModelRuntime({
       registry: options.providerRegistry,
@@ -955,6 +955,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             // 建 run 那一刻会话的权限模式（记进 run-launched，子代理随之）。
             // 惰性同 onRunEvent：启动只来自工具调用或 v4 命令，那时 runtime 必已就绪。
             permissionMode: () => getRuntime().getMode(),
+            // ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）：配额类停止在 driver 侧改走患者重驱，
+            // 不再 stopRun。预解析一次，随 deps 下传。
+            ...(isZCodeDebugModeEnabled(options.env ?? process.env) ? { debugMode: true } : {}),
             // 在飞的引擎把本会话钉成常驻。2026-09-15 的 bug：引擎不进 runtime task registry，
             // 常驻池把带着在飞 run 的 App 按 idle（10 分钟）关掉，resume 又起了第二个引擎。
             // 惰性取 runtime 同 onRunEvent：run service 是 AgentRuntime 的依赖，构造更早；

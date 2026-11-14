@@ -11,6 +11,7 @@ import {
 } from "./hooks.js";
 import { refreshWorkspaceTrustAdmission } from "./mcp.js";
 import { withConversationQuotes } from "../helpers/conversation-quotes.js";
+import { isDebugModeRateLimitTurnError } from "../helpers/debug-mode-rate-limit.js";
 import {
   ensureGroupTaskPermissionScope,
   telemetryInputOrigin,
@@ -1075,7 +1076,10 @@ export async function executeTurnCommand(
         // 保留排队输入，等待用户显式继续。
         if (activeTurn && coreError.type !== CoreErrorType.TurnCancelled) {
           const pendingInputs = (await this.rebuildProjection()).pendingSteerInputs;
-          if (pendingInputs.length > 0) {
+          // ZCODE_DEBUG_MODE：限流类 TurnError 不再把队列切成 error-paused——排队输入继续进
+          // 下一轮（下一轮在 runner 里患者探测），自动化迭代不被窗口/账单状态打断。
+          // flag off 时谓词恒 false，行为逐字不变。
+          if (pendingInputs.length > 0 && !isDebugModeRateLimitTurnError(coreError)) {
             this.queueAutoDrain = false;
             this.queueExternalDrainActive = false;
           }

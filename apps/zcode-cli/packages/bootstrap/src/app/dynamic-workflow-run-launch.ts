@@ -294,6 +294,9 @@ export function launchDynamicWorkflowRun(
     seatGate,
     // 测试注入的 driver 时钟（故障矩阵）；生产缺席，driver 走真时间。
     ...(deps.driverClock === undefined ? {} : { clock: deps.driverClock }),
+    // ZCODE_DEBUG_MODE 预解析 flag：配额类停止在 driver 侧改走患者重驱（spec：
+    // docs/design/v2/debug-mode.md）。缺席即默认行为。
+    ...(deps.debugMode === undefined ? {} : { debugMode: deps.debugMode }),
     // 会话静默探针的回填口（见入参字段注释）：driver 在构造时调一次。
     ...(input.onQuiescenceProbe === undefined
       ? {}

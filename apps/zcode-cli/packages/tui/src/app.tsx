@@ -199,6 +199,8 @@ export function TuiApp({
     observeSessionEvent: subagents.onEvent,
     copy: copy.tui,
     getMainSessionId: options.getMainSessionId,
+    // ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）：TuiOptions 预解析 flag。
+    debugMode: options.debugMode === true,
     setActiveTurnId,
     setCacheStats,
     setContextUsage,

@@ -26,6 +26,23 @@ export const ZCODE_CUA_NODE_REPL_HOST_ENV_KEY = "ZCODE_CUA_NODE_REPL_HOST";
 // main→host 边界删除，不能用于 signed release 的 runtime override。
 export const ZCODE_CUA_DEV_MODE_ENV_KEY = "ZCODE_CUA_DEV_MODE";
 
+/**
+ * `ZCODE_DEBUG_MODE`（默认 false）：本机开发/自动化测试专用的韧性开关（spec：
+ * apps/zcode-cli/docs/design/v2/debug-mode.md）。true 时 CLI 把限流/配额类失败当作
+ * 「窗口刚重置」——按 offpeak 式患者探测重试而非停止（不消耗 Default 重试预算），
+ * 绕过 workflow 并发治理器的 429 冷却冻结，并压下限额警告文案。用户侧行为与默认
+ * **逐字节相同**的要求只约束关闭态：默认（未设置 / 0 / false / off）时一切路径不变。
+ * 只读 env（无副作用），在 adapters runner / bootstrap 治理器 / core 文案 / TUI 四处
+ * 分别按 DI 注入的 env 或进程 env 读取。
+ */
+export const ZCODE_DEBUG_MODE_ENV_KEY = "ZCODE_DEBUG_MODE";
+
+/** 是否开启 ZCODE_DEBUG_MODE（"1" / "true" / "on"，其余一律 false，含未设置）。 */
+export function isZCodeDebugModeEnabled(env: EnvRecord = process.env): boolean {
+  const explicit = env[ZCODE_DEBUG_MODE_ENV_KEY]?.trim().toLowerCase();
+  return explicit === "1" || explicit === "true" || explicit === "on";
+}
+
 export type ZCodeRuntimeEnv = "development" | "production" | "test";
 
 type EnvRecord = Record<string, string | undefined>;

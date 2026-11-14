@@ -4,6 +4,7 @@ import type {
   DynamicWorkflowRunStopReason,
   ModelUsage,
 } from "@zcode/contracts";
+import { isZCodeDebugModeEnabled } from "@zcode/shared";
 import type { RuntimeTaskType } from "./registry.js";
 import { formatWorkflowProviderStopError } from "./workflow-notification-copy.js";
 
@@ -223,7 +224,10 @@ function formatLocalWorkflowTaskNotification(input: TaskNotificationInput): stri
         hasArtifacts: input.artifacts !== undefined,
         runId: input.taskId,
         scriptPath: input.scriptPath,
+        // ZCODE_DEBUG_MODE：压下「额度重置后自动续跑」的呈现指引句（<error> 块本身也已是
+        // 中性文案）；flag off 逐字不变。
         autoResumesAfterReset:
+          !isZCodeDebugModeEnabled() &&
           input.failure?.providerStop?.kind === "quota" &&
           input.failure.providerStop.resetAt !== undefined,
       }),

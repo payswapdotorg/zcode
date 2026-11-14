@@ -8,6 +8,7 @@ import {
   ModelTransportKind as ModelTransportKindValue,
   type ModelRetryBudget,
 } from "@zcode/contracts";
+import { isZCodeDebugModeEnabled } from "@zcode/shared";
 import {
   classifyModelFailure,
   findProviderBusinessError,
@@ -22,6 +23,7 @@ import {
   unwrapRetryError,
 } from "./failure-inspection.js";
 import { offPeakTicketExpiredMessage, resolveOffPeakFailureDecision } from "./offpeak-retry.js";
+import { debugQuotaProbeDelayMs, isDebugQuotaStopFailure } from "./debug-quota-retry.js";
 import { isRetrySafePreludeStreamEvent } from "./stream-retry-boundary.js";
 import {
   createLinkedAbortController,
@@ -146,6 +148,10 @@ export async function* runStreamText(input: {
       failure,
       inspectProviderFailure(error).providerErrorCode,
     ));
+  // ZCODE_DEBUG_MODE（默认 false，一次请求读一次）：配额/限流类停止改走患者探测（见 debug-quota-retry.ts）。
+  const debugMode = isZCodeDebugModeEnabled(input.env);
+  // 本次请求里连续配额停止的次数：60s→10min→…→1h 升梯的输入。
+  let debugQuotaProbeCount = 0;
 
   for (
     let attempt = 1;
@@ -170,6 +176,7 @@ export async function* runStreamText(input: {
     let emittedError = false;
     let retryScheduledFromStreamChunk = false;
     let offPeakQueueHoldFromStreamChunk = false;
+    let debugQuotaProbeHoldFromStreamChunk = false;
     const pendingRetrySafeEvents: ModelStreamEvent[] = [];
     const diagnostics = createStreamDiagnostics();
     const attemptAbortController = createLinkedAbortController(input.request.abortSignal);
@@ -416,6 +423,9 @@ export async function* runStreamText(input: {
             diagnostics,
             emittedRetryBoundaryEvent,
             input,
+            // ZCODE_DEBUG_MODE：预解析的 flag 与升梯计数（见 debug-quota-retry.ts）。
+            debugMode,
+            noteDebugQuotaProbe: () => (debugQuotaProbeCount += 1),
             pendingRetrySafeEvents,
             requestHeaderCount,
             requestHeaders,
@@ -490,6 +500,7 @@ export async function* runStreamText(input: {
           awaitIteratorClose = true;
           retryScheduledFromStreamChunk = true;
           offPeakQueueHoldFromStreamChunk = event.offPeakQueueHold;
+          debugQuotaProbeHoldFromStreamChunk = event.debugQuotaProbeHold;
           break;
         }
         if (event.terminalError) {
@@ -506,8 +517,8 @@ export async function* runStreamText(input: {
       }
 
       if (retryScheduledFromStreamChunk) {
-        if (offPeakQueueHoldFromStreamChunk) {
-          // 排队等待不消耗重试预算：回退计数让 for 自增后原地重试。
+        if (offPeakQueueHoldFromStreamChunk || debugQuotaProbeHoldFromStreamChunk) {
+          // 排队等待/患者探测不消耗重试预算：回退计数让 for 自增后原地重试。
           attempt -= 1;
         }
         continue;
@@ -562,6 +573,19 @@ export async function* runStreamText(input: {
             hiddenProviderBusinessError,
             input.request.abortSignal,
           );
+          // ZCODE_DEBUG_MODE：自然 EOF 处合成的配额类业务错误（如 HTTP 200 空流带额度码）在
+          // 未见输出时同样患者探测——抛底层错误进外层 catch 的 debug 探测分支，而不是
+          // TerminalStreamChunkError 直通。默认（flag off）逐字不变。
+          if (
+            debugMode &&
+            !emittedRetryBoundaryEvent &&
+            isDebugQuotaStopFailure(
+              failure,
+              inspectProviderFailure(hiddenProviderBusinessError).providerErrorCode,
+            )
+          ) {
+            throw hiddenProviderBusinessError;
+          }
           throw new TerminalStreamChunkError(
             toAdapterError(hiddenProviderBusinessError, failure, statusContext, attempt, {
               ...compactStreamFailureContext(
@@ -596,6 +620,17 @@ export async function* runStreamText(input: {
               streamEndedWithoutOutputError,
               input.request.abortSignal,
             );
+            // ZCODE_DEBUG_MODE：同上——配额类（非请求校验类）空流错误也走患者探测。
+            if (
+              debugMode &&
+              !emittedRetryBoundaryEvent &&
+              isDebugQuotaStopFailure(
+                failure,
+                inspectProviderFailure(streamEndedWithoutOutputError).providerErrorCode,
+              )
+            ) {
+              throw streamEndedWithoutOutputError;
+            }
             throw new TerminalStreamChunkError(
               toAdapterError(streamEndedWithoutOutputError, failure, statusContext, attempt, {
                 ...compactStreamFailureContext(
@@ -787,6 +822,15 @@ export async function* runStreamText(input: {
               }
             : classified;
       countUnrecognizedCode(failure, error);
+      // ZCODE_DEBUG_MODE：非 off-peak、未见输出的配额/限流类停止改走患者探测——预算豁免、
+      // 60s→10min→1h 间距、原地无限重试。SSE 可见输出边界仍适用（不重放已见输出），
+      // 越界的交给上层（workflow driver 的患者重驱 / 主对话的队列续跑）。
+      const debugQuotaProbe =
+        debugMode &&
+        offPeak === null &&
+        !emittedRetryBoundaryEvent &&
+        isDebugQuotaStopFailure(failure, inspectProviderFailure(error).providerErrorCode);
+      if (debugQuotaProbe) debugQuotaProbeCount += 1;
       const errorPhase =
         readModelFailureErrorPhase(error) ?? (streamIterator === undefined ? "prepare" : "stream");
       awaitIteratorClose = failure.reason !== ModelFailureReasonValue.Cancelled;
@@ -827,6 +871,10 @@ export async function* runStreamText(input: {
       }
       // off-peak 排队 429 豁免预算：不消耗 maxAttempts，SSE 可见输出边界仍适用。
       if (offPeak?.kind === "queued" && !emittedRetryBoundaryEvent) {
+        failureDecision.canRetry = true;
+      }
+      // ZCODE_DEBUG_MODE：配额类停止同样豁免预算（可见输出边界已在 debugQuotaProbe 判定里）。
+      if (debugQuotaProbe) {
         failureDecision.canRetry = true;
       }
       if (retryWithRepairedHistory) {
@@ -920,7 +968,9 @@ export async function* runStreamText(input: {
       const delayMs =
         offPeak?.kind === "queued"
           ? offPeak.delayMs
-          : calculateRetryDelay(input.retry, retryBudgetAttempt, failure.retryAfterMs);
+          : debugQuotaProbe
+            ? debugQuotaProbeDelayMs(debugQuotaProbeCount)
+            : calculateRetryDelay(input.retry, retryBudgetAttempt, failure.retryAfterMs);
       logRetryDelayDecision({
         attempt,
         canRetry: failureDecision.canRetry,
@@ -974,8 +1024,8 @@ export async function* runStreamText(input: {
           errorPhase: "connect",
         });
       }
-      if (offPeak?.kind === "queued") {
-        // 排队等待不消耗重试预算：回退计数让 for 自增后原地重试，无限探测。
+      if (offPeak?.kind === "queued" || debugQuotaProbe) {
+        // 排队等待/患者探测不消耗重试预算：回退计数让 for 自增后原地重试，无限探测。
         attempt -= 1;
       }
     } finally {
@@ -1121,6 +1171,10 @@ async function handleStreamChunk(input: {
     retry: ResolvedAiSdkModelRetryOptions;
     statusSink?: ModelStatusSink;
   };
+  /** ZCODE_DEBUG_MODE 预解析 flag（外层 for 每请求读一次 env）。 */
+  debugMode: boolean;
+  /** 记一次 debug 患者探测，返回含这次的连续次数（升梯输入）。 */
+  noteDebugQuotaProbe: () => number;
   pendingRetrySafeEvents: ModelStreamEvent[];
   repairThinkingSignatureRejection: (error: unknown) => boolean;
   canRecoverProjectToken: (error: unknown) => boolean;
@@ -1139,6 +1193,8 @@ async function handleStreamChunk(input: {
   retryScheduled: boolean;
   /** off-peak 排队重试：外层 for 冻结 attempt 预算。 */
   offPeakQueueHold: boolean;
+  /** ZCODE_DEBUG_MODE 配额患者探测重试：同样冻结 attempt 预算。 */
+  debugQuotaProbeHold: boolean;
   terminalError?: TerminalStreamChunkError;
   visibleEvents: ModelStreamEvent[];
 }> {
@@ -1354,6 +1410,12 @@ async function handleStreamErrorEvent(
         : classified;
   const unrecognizedCodeStreak = input.countUnrecognizedCode(failure, error);
   const responseHeaders = sanitizeModelNetworkHeaders(getResponseHeaders(unwrapRetryError(error)));
+  // ZCODE_DEBUG_MODE：SSE 错误块（尚无可见输出时的 offpeak 判定同源）配额类停止同样患者探测。
+  const debugQuotaProbe =
+    input.debugMode &&
+    offPeak === null &&
+    !input.emittedRetryBoundaryEvent &&
+    isDebugQuotaStopFailure(failure, inspectProviderFailure(error).providerErrorCode);
   const failureDecision = resolveStreamFailureDecision({
     attempt: input.retryBudgetAttempt,
     emittedRetryBoundaryEvent: input.emittedRetryBoundaryEvent,
@@ -1368,6 +1430,10 @@ async function handleStreamErrorEvent(
   });
   // off-peak 排队 429 豁免预算：不消耗 maxAttempts，SSE 可见输出边界仍适用。
   if (offPeak?.kind === "queued" && !input.emittedRetryBoundaryEvent) {
+    failureDecision.canRetry = true;
+  }
+  // ZCODE_DEBUG_MODE：配额类停止同样豁免预算（可见输出边界已在 debugQuotaProbe 判定里）。
+  if (debugQuotaProbe) {
     failureDecision.canRetry = true;
   }
   if (retryWithRepairedHistory) {
@@ -1441,7 +1507,9 @@ async function handleStreamErrorEvent(
   const delayMs =
     offPeak?.kind === "queued"
       ? offPeak.delayMs
-      : calculateRetryDelay(input.input.retry, input.retryBudgetAttempt, failure.retryAfterMs);
+      : debugQuotaProbe
+        ? debugQuotaProbeDelayMs(input.noteDebugQuotaProbe())
+        : calculateRetryDelay(input.input.retry, input.retryBudgetAttempt, failure.retryAfterMs);
   logRetryDelayDecision({
     attempt: input.attempt,
     canRetry: failureDecision.canRetry,
@@ -1480,6 +1548,7 @@ async function handleStreamErrorEvent(
     emittedError: true,
     retryScheduled: true,
     offPeakQueueHold: offPeak?.kind === "queued",
+    debugQuotaProbeHold: debugQuotaProbe,
   });
 }
 
@@ -1680,6 +1749,8 @@ function streamChunkResult(
     retryScheduled: boolean;
     /** off-peak 排队重试：外层 for 冻结 attempt 预算。 */
     offPeakQueueHold: boolean;
+    /** ZCODE_DEBUG_MODE 配额患者探测重试：同样冻结 attempt 预算。 */
+    debugQuotaProbeHold: boolean;
     terminalError?: TerminalStreamChunkError;
     visibleEvents: ModelStreamEvent[];
   }> = {},
@@ -1690,6 +1761,7 @@ function streamChunkResult(
     emittedRetryBoundaryEvent: false,
     retryScheduled: false,
     offPeakQueueHold: false,
+    debugQuotaProbeHold: false,
     visibleEvents: [],
     ...overrides,
   };

@@ -1,6 +1,6 @@
 import type { ToolSearchMode } from "@zcode/contracts";
 import type { RunContext, GlobalOptions } from "@zcode/shared-types";
-import { resolveZCodeRuntimeEnv, type DynamicWorkflowMode } from "@zcode/shared";
+import { isZCodeDebugModeEnabled, resolveZCodeRuntimeEnv, type DynamicWorkflowMode } from "@zcode/shared";
 import { createNodeClipboardImageReader } from "./clipboard-image.js";
 import { createNodeClipboardTextWriter } from "./clipboard-text.js";
 import { listSlashCommandSuggestions } from "./command-center.js";
@@ -33,6 +33,8 @@ export const runTuiCommand = async (
     const workspaceDirectory = (deps.cwd ?? process.cwd)();
     const env = deps.env ?? process.env;
     const developerMode = resolveZCodeRuntimeEnv(env) === "development";
+    // ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）：TUI 侧压下限流类错误面。
+    const debugMode = isZCodeDebugModeEnabled(env);
     const startupLocale = resolveTuiStartupLocale({
       deps,
       options,
@@ -86,6 +88,7 @@ export const runTuiCommand = async (
         },
         locale: startupLocale,
         developerMode,
+        debugMode,
         version,
         workspaceDirectory,
         noColor: options.noColor,

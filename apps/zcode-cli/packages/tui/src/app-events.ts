@@ -51,6 +51,8 @@ type SessionEventHandlers = {
   modifiedFileToolCallIds?: Set<string>;
   toolNamesById: Map<string, string>;
   workspaceDirectory?: string;
+  /** ZCODE_DEBUG_MODE 预解析 flag（TuiOptions.debugMode）：压下限流类错误面。缺圵 false。 */
+  debugMode?: boolean;
 };
 
 export function applySessionEventToState(
@@ -81,6 +83,13 @@ export function applySessionEventToState(
         applyCompactTurnErrorEvent(payload, handlers.setLastError, handlers.setMessages);
         handlers.setStatus(copy.status.compactFailed);
         handlers.setQueuedInputs?.([]);
+        break;
+      }
+      // ZCODE_DEBUG_MODE：限流类错误（run 端正在患者探测 / 队列未被停下）不追加转写错误行、
+      // 不清空排队输入显示——与 runtime 侧「不停队列」同步，避免显示层先一步清空仍在跑的队列。
+      // 状态行照旧（turnFailed 是事实）；flag off 逐字不变。
+      if (handlers.debugMode === true && isModelRateLimitErrorPayload(payload)) {
+        handlers.setStatus(copy.status.turnFailed);
         break;
       }
       applyTurnErrorEvent(payload, handlers.setLastError, handlers.setMessages);
@@ -269,6 +278,20 @@ function applyTurnErrorEvent(
   const message = formatEventError(payload);
   setLastError(message);
   setMessages((current) => appendSystemErrorMessage(current, message));
+}
+
+/** contracts `ModelErrorCode.ModelRateLimited` 的值族：core 投影的 TurnError.error.code。 */
+const MODEL_RATE_LIMIT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "model_rate_limited",
+  "MODEL_RATE_LIMITED",
+]);
+
+/** TurnError/ModelError 载荷是否为限流类（core 的 projectExecutionErrorPayload 投影的 code）。 */
+function isModelRateLimitErrorPayload(payload: Record<string, unknown>): boolean {
+  const error = asRecord(payload.error);
+  if (error === undefined) return false;
+  const code = stringField(error, "code");
+  return code !== undefined && MODEL_RATE_LIMIT_ERROR_CODES.has(code);
 }
 
 function applySessionCreatedEvent(

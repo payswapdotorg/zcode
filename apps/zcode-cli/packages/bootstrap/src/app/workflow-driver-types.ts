@@ -185,6 +185,12 @@ export interface AgentRuntimeWorkflowDriverDeps {
    */
   runId?: string;
   /**
+   * ZCODE_DEBUG_MODE（spec：docs/design/v2/debug-mode.md）预解析 flag。true 时配额类停止
+   * 不再 stopRun，改走与 runner 同一条 60s→10min→1h 患者探测曲线的重驱（见
+   * workflow-driver-model-failure.ts）。缺圵 false：默认行为逐字不变。
+   */
+  debugMode?: boolean;
+  /**
    * 时钟与定时器（apps/zcode-cli/packages/dynamic-workflow/docs/execution-engine.md）：run 级 stall 时钟、瞬态失败的退避
    * 重驱与会话静默的有界等待都用它。可注入只为测试假时间；`stallAfterMs` 缺省 20 分钟；
    * `quiesceMs` 缺省 {@link AMEND_TRANSCRIPT_QUIESCE_MS}；`random` 供退避抖动。
@@ -273,6 +279,11 @@ export interface SessionState {
    * startAsk 归零。
    */
   transientAttempts: number;
+  /**
+   * 本 ask 里 ZCODE_DEBUG_MODE 配额患者重驱的次数：升梯（60s→10min→…→1h）的输入。
+   * startAsk 归零，与 transientAttempts 同族；flag off 时永远为 0（无人写它）。
+   */
+  debugQuotaRedrives: number;
   /** 退避等待中的重驱闹钟；cancelAsk / dispose 撤掉。 */
   cancelRedrive?: () => void;
 }
