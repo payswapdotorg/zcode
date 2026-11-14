@@ -1,0 +1,16 @@
+{
+  "name": "@zcode/debug-mode-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zcode/adapters": "workspace:*",
+    "@zcode/bootstrap": "workspace:*",
+    "@zcode/contracts": "workspace:*",
+    "@zcode/provider": "workspace:*"
+  }
+}
