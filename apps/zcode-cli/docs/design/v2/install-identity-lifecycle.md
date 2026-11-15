@@ -207,19 +207,20 @@ localhost 授权控制台），适用于真人在场、可打开控制台页面�
 
 ### 7.2 生产运行记录（2026-11-15）
 
-两轮完整 phase1→phase2 周期对生产 `https://zcode.z.ai` 执行（每轮独立 5 min 授权窗口，窗口内无人
+三轮完整 phase1→phase2 周期对生产 `https://zcode.z.ai` 执行（每轮独立 5 min 授权窗口，窗口内无人
 完成浏览器授权）：
 
 - phase1：pristine fixture base 上 `reset --apply` → live init 成功——服务端签发真实
   `authorize_url` + `flow_id` + `expires_at`（约 5 min 有效），live `pending` 轮询观测正常；
 - phase2：`pre-registration gating PASS`（`hasConfiguredStandaloneCodingPlan === false` 贯穿全程）→
   纯 `pending` 直到流过期，退出码 4（符合设计）；
-- **残留审计**（两轮过期后）：`base/.zcode` 内**仅有**
+- **残留审计**（三轮过期后，每轮 phase1 均先 `reset --apply` 重建 pristine base）：`base/.zcode` 内
+  **仅有**
   `v2/runtime/provider/linux-x86_64/0.0.0-dev/endpoint-<hash>/zcode-builtin.json`——builtin provider
   catalog 缓存（endpoint 拉取、非身份产物）；`credentials.json` / `provider_config.json` /
   `telemetry-state.json`（deviceMid）全部不存在。§3 的「init 放弃不写任何**凭据/身份**文件」实证成立；
   catalog cache 是唯一残留，且会被 reset 一并清除（删整棵 `.zcode`），不影响 fresh-install 语义；
-- 全周期绿灯路径唯一缺失输入 = 真人在 5 min 窗口内完成 `authorize_url` 授权（两轮窗口无人值守
+- 全周期绿灯路径唯一缺失输入 = 真人在 5 min 窗口内完成 `authorize_url` 授权（三轮窗口无人值守
   过期，非 fixture 缺陷）。
 
 ## 8. 建议的后续（非本任务范围）
