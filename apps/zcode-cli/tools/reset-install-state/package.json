@@ -1,0 +1,21 @@
+{
+  "name": "@zcode/reset-install-state",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "tsx src/verify-fresh-registration.ts",
+    "verify:live": "tsx src/verify-live-cycle.ts",
+    "register:phase1": "tsx src/register-live.ts phase1",
+    "register:phase2": "tsx src/register-live.ts phase2",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "2.1.2",
+    "@zcode/adapters": "workspace:*",
+    "@zcode/bootstrap": "workspace:*",
+    "@zcode/provider-node": "workspace:*",
+    "@zcode/shared": "workspace:*",
+    "@zcode/telemetry": "workspace:*"
+  }
+}
