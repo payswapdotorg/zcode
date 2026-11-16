@@ -1,12 +1,11 @@
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createUuid } from "@zcode/shared";
+import { resolvePayswapIdentityStateFile } from "@zcode/shared/payswap-device-identity";
 
 const LOCK_RETRY_DELAY_MS = 10;
 const LOCK_RETRY_COUNT = 200;
 const LOCK_STALE_MS = 5 * 60 * 1000;
-const ZCODE_DATA_BASE_DIR_ENV_KEY = "ZCODE_DATA_BASE_DIR";
 
 interface TelemetryState {
   deviceMid?: unknown;
@@ -19,8 +18,10 @@ interface TelemetryLockOwner {
 }
 
 export interface EnsureCliDeviceMidOptions {
+  /** 身份命名空间所在主目录；缺省按 env HOME/USERPROFILE → os.homedir() 解析。仅测试注入。 */
   baseDir?: string;
   createId?: () => string;
+  /** 仅用于解析 HOME/USERPROFILE；设备身份不跟随 ZCODE_DATA_BASE_DIR 等数据根配置。 */
   env?: Record<string, string | undefined>;
 }
 
@@ -28,7 +29,8 @@ const deviceMidCacheByStateFile = new Map<string, Promise<string>>();
 
 /**
  * 在 CLI 所在主机独立确保 deviceMid 存在；它是反馈与 provider 请求头使用的设备身份，
- * 与 Desktop 共享同一个 state 文件与字段。
+ * 与 Desktop / 远端 server 共享同一个 state 文件与字段（PaySwap 独立命名空间
+ * `<home>/.payswap/zcode/telemetry-state.json`，见 @zcode/shared/payswap-device-identity）。
  * 文件系统异常不阻断模型请求；同一进程会继续使用首次生成的 fallback UUID。
  */
 export function ensureCliDeviceMid(options: EnsureCliDeviceMidOptions = {}): Promise<string> {
@@ -53,11 +55,10 @@ export function ensureCliDeviceMid(options: EnsureCliDeviceMidOptions = {}): Pro
 }
 
 function resolveCliTelemetryStateFile(options: EnsureCliDeviceMidOptions): string {
-  const env = options.env ?? process.env;
-  const configuredBaseDir =
-    options.baseDir ?? env[ZCODE_DATA_BASE_DIR_ENV_KEY]?.trim() ?? homedir();
-  const baseDir = configuredBaseDir.length > 0 ? configuredBaseDir : homedir();
-  return join(resolveUserPath(baseDir), ".zcode", "v2", "telemetry-state.json");
+  return resolvePayswapIdentityStateFile({
+    homeDir: options.baseDir,
+    env: options.env,
+  });
 }
 
 async function ensurePersistedDeviceMid(input: {
@@ -206,16 +207,6 @@ function isProcessAlive(pid: number): boolean {
   } catch (error) {
     return isNodeErrorCode(error, "EPERM");
   }
-}
-
-function resolveUserPath(value: string): string {
-  if (value === "~") {
-    return homedir();
-  }
-  if (value.startsWith("~/")) {
-    return join(homedir(), value.slice(2));
-  }
-  return resolve(value);
 }
 
 function sleep(delayMs: number): Promise<void> {

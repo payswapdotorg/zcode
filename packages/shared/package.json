@@ -12,6 +12,7 @@
     "./mcp": "./src/mcp.ts",
     "./runtime-tool-runtime": "./src/runtime-tool-runtime.ts",
     "./node-repl-browser-broker": "./src/browser-use/nodeReplBroker.ts",
+    "./payswap-device-identity": "./src/payswapDeviceIdentity.ts",
     "./process-diagnostic": "./src/process-diagnostic.ts",
     "./agent-crash-diagnostic": "./src/agent-crash-diagnostic/index.ts",
     "./model-selection": "./src/model-selection.ts",
@@ -42,7 +43,8 @@
   },
   "scripts": {
     "lint": "oxlint",
-    "lint:fix": "oxlint --fix"
+    "lint:fix": "oxlint --fix",
+    "test:payswap-identity": "tsx --test test/payswapDeviceIdentity.node.test.ts"
   },
   "dependencies": {
     "@napi-rs/keyring": "2.1.2",

@@ -14,7 +14,8 @@
   },
   "scripts": {
     "lint": "oxlint",
-    "lint:fix": "oxlint --fix"
+    "lint:fix": "oxlint --fix",
+    "test:payswap-identity": "tsx --test test/telemetryDeviceIdentity.node.test.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.21.1",

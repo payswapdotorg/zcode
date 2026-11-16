@@ -23,9 +23,10 @@ import type {
 const logger = createServiceLogger("onboardingRecordService");
 
 function getRecordFile(): string {
-  // 记录是设备级数据，必须跟随 dataBaseDir（用户自定义数据目录时落在其 .zcode/v2 下，
-  // 与 telemetry-state.json 一致），不能学 setting.json 固定写 home——setting.json 留在 home
-  // 只是启动引导需要固定位置读取 dataBaseDir，不代表其他设备数据的落点。
+  // 记录是设备级数据，必须跟随 dataBaseDir（用户自定义数据目录时落在其 .zcode/v2 下），
+  // 不能学 setting.json 固定写 home——setting.json 留在 home 只是启动引导需要固定位置读取
+  // dataBaseDir，不代表其他设备数据的落点。（设备身份 deviceMid 自 PaySwap 命名空间隔离起
+  // 已改锚定 OS 主目录的 ~/.payswap/zcode/telemetry-state.json，不再与本记录同目录。）
   return join(getAppConfigDir(), "onboarding-record.json");
 }
 

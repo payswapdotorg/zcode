@@ -19,6 +19,8 @@ import {
 } from "./test-provider-config.js";
 import { executeAdapterGenerateText, executeAdapterStreamText } from "./test-adapter-model.js";
 
+/* 设备身份位于 PaySwap 独立命名空间 <home>/.payswap/zcode/telemetry-state.json；
+   测试用 HOME 指向临时根来隔离（身份不跟随 ZCODE_DATA_BASE_DIR 数据根）。 */
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
@@ -37,13 +39,37 @@ describe("ensureCliDeviceMid", () => {
 
     const deviceMid = await ensureCliDeviceMid({
       createId: () => "should-not-be-created",
-      env: { ZCODE_DATA_BASE_DIR: root },
+      env: { HOME: root },
     });
 
     expect(deviceMid).toBe("7f1431f0-53e8-41c1-9cf9-22d11aa51d6a");
     await expect(readJson(stateFile)).resolves.toEqual({
       deviceMid: "7f1431f0-53e8-41c1-9cf9-22d11aa51d6a",
       lastDailyActiveDate: "2026-07-27",
+    });
+  });
+
+  it("ignores a legacy ~/.zcode/v2 identity and never rewrites the legacy file", async () => {
+    const root = await createTemporaryRoot();
+    const legacyStateFile = join(root, ".zcode", "v2", "telemetry-state.json");
+    await mkdir(join(root, ".zcode", "v2"), { recursive: true });
+    await writeFile(
+      legacyStateFile,
+      JSON.stringify({ deviceMid: "legacy-mid-must-not-be-reused" }, null, 2),
+      "utf-8",
+    );
+
+    const deviceMid = await ensureCliDeviceMid({ env: { HOME: root } });
+
+    expect(deviceMid).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(deviceMid).not.toBe("legacy-mid-must-not-be-reused");
+    // 新身份落在 PaySwap 命名空间。
+    await expect(readJson(telemetryStateFile(root))).resolves.toEqual({
+      deviceMid,
+    });
+    // 旧命名空间文件原样保留，不迁移、不改动。
+    await expect(readJson(legacyStateFile)).resolves.toEqual({
+      deviceMid: "legacy-mid-must-not-be-reused",
     });
   });
 
@@ -59,9 +85,9 @@ describe("ensureCliDeviceMid", () => {
     };
 
     const values = await Promise.all([
-      ensureCliDeviceMid({ createId, env: { ZCODE_DATA_BASE_DIR: root } }),
-      ensureCliDeviceMid({ createId, env: { ZCODE_DATA_BASE_DIR: root } }),
-      ensureCliDeviceMid({ createId, env: { ZCODE_DATA_BASE_DIR: root } }),
+      ensureCliDeviceMid({ createId, env: { HOME: root } }),
+      ensureCliDeviceMid({ createId, env: { HOME: root } }),
+      ensureCliDeviceMid({ createId, env: { HOME: root } }),
     ]);
 
     expect(values).toEqual([
@@ -80,7 +106,7 @@ describe("ensureCliDeviceMid", () => {
     const root = await createTemporaryRoot();
 
     const deviceMid = await ensureCliDeviceMid({
-      env: { ZCODE_DATA_BASE_DIR: root },
+      env: { HOME: root },
     });
 
     expect(deviceMid).toMatch(
@@ -100,11 +126,11 @@ describe("ensureCliDeviceMid", () => {
 
     const first = await ensureCliDeviceMid({
       createId,
-      env: { ZCODE_DATA_BASE_DIR: blockedBaseDir },
+      env: { HOME: blockedBaseDir },
     });
     const second = await ensureCliDeviceMid({
       createId,
-      env: { ZCODE_DATA_BASE_DIR: blockedBaseDir },
+      env: { HOME: blockedBaseDir },
     });
 
     expect(first).toBe("fallback-1");
@@ -146,7 +172,7 @@ describe("Anthropic request metadata", () => {
 
     await expect(
       resolveAnthropicRequestMetadataUserId({
-        env: { ZCODE_DATA_BASE_DIR: root },
+        env: { HOME: root },
         providerKind: "openai-compatible",
         sessionId: "sess_openai",
       }),
@@ -214,7 +240,7 @@ describe("Anthropic request metadata", () => {
       },
     };
     const adapter = new AiSdkModelAdapter({
-      env: { ZCODE_DATA_BASE_DIR: root },
+      env: { HOME: root },
       registry: anthropicRegistry(),
       runtime,
     });
@@ -274,12 +300,12 @@ async function createTemporaryRoot(): Promise<string> {
 }
 
 function telemetryStateFile(root: string): string {
-  return join(root, ".zcode", "v2", "telemetry-state.json");
+  return join(root, ".payswap", "zcode", "telemetry-state.json");
 }
 
 async function writeTelemetryState(root: string, state: Record<string, unknown>): Promise<string> {
   const stateFile = telemetryStateFile(root);
-  await mkdir(join(root, ".zcode", "v2"), { recursive: true });
+  await mkdir(join(root, ".payswap", "zcode"), { recursive: true });
   await writeFile(stateFile, JSON.stringify(state, null, 2), "utf-8");
   return stateFile;
 }

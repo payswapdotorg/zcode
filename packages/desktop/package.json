@@ -56,7 +56,8 @@
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "test:agent-crash-diagnostic": "tsx --test test/agent-crash-diagnostic.node.test.ts",
-    "test:e2e:retention": "tsx --test test/e2e/conversation-session/runtime/manual-review/pending/conversation-session-snapshot-retention.test.ts"
+    "test:e2e:retention": "tsx --test test/e2e/conversation-session/runtime/manual-review/pending/conversation-session-snapshot-retention.test.ts",
+    "test:payswap-identity": "tsx --test test/desktopDeviceMid.node.test.ts"
   },
   "dependencies": {
     "@arms/rum-electron": "^0.0.3",

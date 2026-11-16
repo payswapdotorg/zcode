@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolvePayswapIdentityStateFile } from "@zcode/shared/payswap-device-identity";
 import type {
   AgentTelemetryRuntimeOwner,
   AgentExecutionTelemetryPort,
@@ -126,7 +126,7 @@ export async function prepareModelTelemetryEnv(
   }
   const existingInstallationId = normalizeTelemetryDeviceMid(env.ZCODE_TELEMETRY_DEVICE_MID);
   const installationId =
-    existingInstallationId ?? (await resolveStandaloneDeviceMid(env.ZCODE_HOME?.trim()));
+    existingInstallationId ?? (await resolveStandaloneDeviceMid(env));
   const preparedEnv = installationId ? { ...env, ZCODE_TELEMETRY_DEVICE_MID: installationId } : env;
 
   if (!preparingOwner && !preparedOwner) {
@@ -220,12 +220,15 @@ function normalizeTelemetryId(value: string | undefined): string | undefined {
   return normalized && TELEMETRY_ID_PATTERN.test(normalized) ? normalized : undefined;
 }
 
+/**
+ * 独立 CLI 的匿名设备身份：PaySwap 独立命名空间 `<home>/.payswap/zcode/telemetry-state.json`
+ * （home 按 env HOME/USERPROFILE → os.homedir() 解析；不跟随 ZCODE_HOME / ZCODE_DATA_BASE_DIR
+ * 等数据根配置，不回退旧 ~/.zcode/v2 路径）。与 Desktop / 远端 server 共享同一身份文件。
+ */
 async function resolveStandaloneDeviceMid(
-  zcodeHome: string | undefined,
+  env: EnvRecord,
 ): Promise<string | undefined> {
-  const stateFile = zcodeHome
-    ? join(zcodeHome, "v2", "telemetry-state.json")
-    : join(homedir(), ".zcode", "v2", "telemetry-state.json");
+  const stateFile = resolvePayswapIdentityStateFile({ env });
   const pending = pendingStandaloneDeviceMidByStateFile.get(stateFile);
   if (pending) return pending;
   const resolution = resolveStandaloneDeviceMidFromFile(stateFile);

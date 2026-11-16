@@ -19,7 +19,7 @@ describe("prepareZCodeTelemetryEnv", () => {
       const env: NodeJS.ProcessEnv = {
         OTEL_EXPORTER_OTLP_HEADERS: "x-arms-license-key=secret",
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://arms.example/v1/traces",
-        ZCODE_HOME: root,
+        HOME: root,
       };
       sanitizeZCodeRuntimeEnvInPlace(env);
 
@@ -29,7 +29,7 @@ describe("prepareZCodeTelemetryEnv", () => {
       expect(prepared.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).toBeUndefined();
       expect(prepared.ZCODE_TELEMETRY_DEVICE_MID).toMatch(/^[0-9a-f-]{36}$/u);
       const state = JSON.parse(
-        await readFile(join(root, "v2", "telemetry-state.json"), "utf8"),
+        await readFile(join(root, ".payswap", "zcode", "telemetry-state.json"), "utf8"),
       ) as Record<string, unknown>;
       expect(state.deviceMid).toBe(prepared.ZCODE_TELEMETRY_DEVICE_MID);
     } finally {

@@ -12,13 +12,16 @@
   ├── perf/
   ├── sessions/
   ├── tasks-index.sqlite
-  ├── telemetry-state.json
   └── ...
 
 <dataBaseDir>/.zcode/workspace/default/  ← 非项目对话共享的真实工作目录
 
 ~/.zcode/v2/setting.json          ← Bootstrap 指针（永远在默认 homedir 下）
 ```
+
+设备身份（`deviceMid`）不随数据目录迁移：它锚定 OS 主目录的
+`~/.payswap/zcode/telemetry-state.json`（PaySwap 独立设备身份命名空间，
+见 `docs/zcode-endpoint-device-mid-header.md`），与本目录配置无关。
 
 ## Bootstrap 机制
 

@@ -1,18 +1,17 @@
 import { readFile } from "node:fs/promises";
-import { arch as readOsArch, homedir, release as readOsRelease } from "node:os";
-import { join } from "node:path";
+import { arch as readOsArch, release as readOsRelease } from "node:os";
 import {
   buildZCodeSourceHeadersFromContext,
   resolveRuntimeZCodeEndpointOrigin,
   resolveRuntimeZCodeEnv,
   ZCODE_APP_VERSION_ENV,
 } from "@zcode/shared";
+import { resolvePayswapIdentityStateFile } from "@zcode/shared/payswap-device-identity";
 import {
   resolveClientLanguageForHeaders,
   type ModelProviderSourceTitle,
 } from "./model-config.js";
 
-const ZCODE_DATA_BASE_DIR_ENV_KEY = "ZCODE_DATA_BASE_DIR";
 const cachedDeviceMidByStateFile = new Map<string, string>();
 
 interface CreateProviderEndpointRoutingSourceHeadersOptions {
@@ -46,8 +45,9 @@ function resolveClientTimezone(): string {
 }
 
 function resolveTelemetryStateFile(env: NodeJS.ProcessEnv): string {
-  const dataBaseDir = env[ZCODE_DATA_BASE_DIR_ENV_KEY]?.trim() || homedir();
-  return join(dataBaseDir, ".zcode", "v2", "telemetry-state.json");
+  // PaySwap 独立设备身份命名空间：身份锚定 OS 用户主目录（env HOME/USERPROFILE →
+  // os.homedir()），不跟随 ZCODE_DATA_BASE_DIR 数据根，不回退旧 ~/.zcode/v2 路径。
+  return resolvePayswapIdentityStateFile({ env });
 }
 
 async function readExistingDeviceMid(
@@ -74,7 +74,8 @@ async function readExistingDeviceMid(
     cachedDeviceMidByStateFile.set(stateFile, deviceMid);
     return deviceMid;
   } catch {
-    // deviceMid 由 Desktop telemetry 管理；Agent 只异步复用已存在值，不创建或修改设备身份。
+    // deviceMid 由设备身份生命周期所有者（Desktop main / 远端 server / CLI 首次模型请求）
+    // 写入 PaySwap 命名空间；Agent 只异步复用已存在值，不创建或修改设备身份。
     return undefined;
   }
 }

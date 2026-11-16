@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { version as readOsVersion } from "node:os";
-import { join } from "node:path";
 import {
   buildZCodeSourceHeadersFromContext,
   normalizeZCodeSourceHeaderValue,
@@ -8,7 +7,7 @@ import {
   ZCODE_SOURCE_HEADERS,
   ZCODE_VERSION,
 } from "@zcode/shared";
-import { getAppConfigDir } from "../paths.js";
+import { resolvePayswapIdentityStateFile } from "@zcode/shared/payswap-device-identity";
 
 export { ZCODE_SOURCE_HEADERS };
 
@@ -39,7 +38,9 @@ function resolveClientTimezone(): string {
 }
 
 function readExistingDeviceMid(): string | undefined {
-  const stateFile = join(getAppConfigDir(), "telemetry-state.json");
+  // PaySwap 独立设备身份命名空间：<home>/.payswap/zcode/telemetry-state.json。
+  // 身份锚定 OS 用户主目录，不跟随数据根；不回退旧 ~/.zcode/v2 路径。
+  const stateFile = resolvePayswapIdentityStateFile();
   if (cachedDeviceMid?.stateFile === stateFile) {
     return cachedDeviceMid.value;
   }

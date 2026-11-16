@@ -7,21 +7,30 @@ import {
 import { dirname, join } from "node:path";
 
 import { createUuid } from "@zcode/shared";
-import { getAppConfigDir } from "@zcode/services/node";
+import { resolvePayswapIdentityDir } from "@zcode/shared/payswap-device-identity";
 
 export interface EnsureDesktopDeviceMidSyncOptions {
-  /** state 文件所在目录，默认 getAppConfigDir()（即 ~/.zcode/v2）。仅测试注入 */
-  configDir?: string;
+  /**
+   * telemetry-state.json 所在目录，默认 `~/.payswap/zcode`（PaySwap ZCode 独立设备身份命名空间，
+   * 见 @zcode/shared/payswap-device-identity）。仅测试注入。
+   */
+  stateDir?: string;
   /** UUID 生成器，默认 createUuid。仅测试注入 */
   createId?: () => string;
 }
 
 /**
- * 同步确保设备身份文件（磁盘文件名沿用 telemetry-state.json，与 CLI / 远端 server 共享）里有 deviceMid，并返回该值。
+ * 同步确保设备身份文件（`~/.payswap/zcode/telemetry-state.json`，PaySwap 独立命名空间）里有
+ * deviceMid，并返回该值。
  *
  * 与数仓上报（telemetryCore）共用同一个文件的 `deviceMid` 字段，使 ARMS 与数仓两套
  * device_mid 统一为同一个持久化 UUID。ARMS 侧需要在窗口创建前同步取值（经 preload
  * `--device-id=` 注入），故此处用 node:fs 同步读写。
+ *
+ * 命名空间隔离：只读写 PaySwap 自己的 `~/.payswap/zcode/`，不读取、不迁移、不回退旧的
+ * `~/.zcode/v2/telemetry-state.json`（该文件属于同机其他 ZCode 系应用）；首次启动在新命名
+ * 空间生成全新 UUID，普通重启/升级/保留用户数据的重装都复用同一身份。身份锚定 OS 用户主
+ * 目录，不跟随 Desktop 数据目录重定位。
  *
  * 竞态规避：
  * - 已存在合法 deviceMid 时直接返回、绝不写盘（老用户/二次启动零写入）。
@@ -37,8 +46,8 @@ export function ensureDesktopDeviceMidSync(
 ): string {
   const createId = options?.createId ?? createUuid;
   try {
-    const configDir = options?.configDir ?? getAppConfigDir();
-    const stateFile = join(configDir, "telemetry-state.json");
+    const stateDir = options?.stateDir ?? resolvePayswapIdentityDir();
+    const stateFile = join(stateDir, "telemetry-state.json");
 
     const state = readTelemetryStateSync(stateFile);
     if (typeof state.deviceMid === "string" && state.deviceMid) {

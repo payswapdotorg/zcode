@@ -6,7 +6,8 @@ App 层访问 ZCode endpoint（默认 `https://zcode.z.ai`，或当前 `ZCODE_BA
 
 ## 设计
 
-- 设备标识复用既有 telemetry state 中的 `deviceMid`，即 `{appConfigDir}/telemetry-state.json` 的 `deviceMid` 字段。
+- 设备标识复用既有 telemetry state 中的 `deviceMid`，即 `~/.payswap/zcode/telemetry-state.json`
+  （PaySwap 独立设备身份命名空间）的 `deviceMid` 字段。
 - `buildZCodeSourceHeadersFromContext()` 是跨 App/Agent 的纯来源 header 组装规则；
   app 服务层 `buildZCodeSourceHeaders()` 继续负责读取已有 `deviceMid` 后调用该共享规则。
 - 只读取已存在且可作为 HTTP header 输出的 `deviceMid`；读取失败或字段缺失时不在该函数里生成新设备 ID，避免改变设备 ID 生命周期。
@@ -15,6 +16,26 @@ App 层访问 ZCode endpoint（默认 `https://zcode.z.ai`，或当前 `ZCODE_BA
 - `NodeApiClient` 仍只负责在命中当前 ZCode endpoint 时注入 `buildZCodeSourceHeaders()` 返回的 headers，并保留调用方显式传入的同名 header。
 - ZCode CLI 的 provider endpoint routing 配置 GET 通过独立 bootstrap source-header provider
   异步读取同一 telemetry state，再调用共享组装规则；该读取不会进入模型 transport 或普通 tool HTTP 出口。
+
+## 设备身份命名空间（PaySwap 独立）
+
+PaySwap ZCode 发行版的设备身份位于独立命名空间，不再与其他 ZCode 系应用共享文件：
+
+```text
+<OS 主目录>/.payswap/zcode/telemetry-state.json   # deviceMid
+<OS 主目录>/.payswap/zcode/telemetry-state.lock   # 同目录互斥锁
+```
+
+路径事实源：`@zcode/shared/payswap-device-identity`（`packages/shared/src/payswapDeviceIdentity.ts`）。
+所有运行环境（Desktop main、app services、远端 Server、独立 CLI）一律经由它解析，规则：
+
+- 身份只锚定 OS 用户主目录（按 `HOME` / `USERPROFILE` → `os.homedir()` 解析），同机同账号下所有
+  运行时解析到同一文件；不跟随 `ZCODE_DATA_BASE_DIR` / `ZCODE_HOME` / Desktop 数据目录重定位。
+- 不读取、不迁移、不回退旧 `~/.zcode/v2/telemetry-state.json`；新命名空间首次初始化生成全新 UUID。
+  旧文件属于同机其他 ZCode 系应用（MOS、Aurum、PlayLiquid 等），本发行版永不改动它。
+- 身份在普通重启、应用升级、保留用户数据的重装中持久保留。
+- 远端 Server 自身的 `install.json` `installationId`（安装配对身份）是另一套独立生命周期，与
+  本命名空间无关，互不影响。
 
 ## 覆盖范围
 
@@ -28,7 +49,7 @@ App 层访问 ZCode endpoint（默认 `https://zcode.z.ai`，或当前 `ZCODE_BA
 桌面端                                   远端主机 / 独立 Server
 main ──ensureDesktopDeviceMidSync──┐     Core / Lite ─> createServerHostServices ──ensureTelemetryDeviceMid──┐
                                    │     entry-stdio（旧）──ensureRemoteServerDeviceMid──────────────────────┤
-                                   ├─> ~/.zcode/v2/telemetry-state.json.deviceMid <─────────────────────────┤
+                                   ├─> ~/.payswap/zcode/telemetry-state.json.deviceMid <────────────────────┤
 host ──buildZCodeSourceHeaders 读──┘     services ──buildZCodeSourceHeaders 读──────────────────────────────┤
                                           zcode-cli ──ensureCliDeviceMid────────────────────────────────────┘
 ```

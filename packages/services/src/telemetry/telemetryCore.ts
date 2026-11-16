@@ -14,9 +14,12 @@ import {
 import { mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { version } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import {
+  resolvePayswapIdentityLockFile,
+  resolvePayswapIdentityStateFile,
+} from "@zcode/shared/payswap-device-identity";
 import { createServiceLogger } from "#src/logger/serviceLogger.js";
-import { getAppConfigDir } from "../paths.js";
 
 const REPORT_ENDPOINT = ZCODE_TELEMETRY_REPORT_ENDPOINT;
 
@@ -129,18 +132,17 @@ function toLocalDateKey(timestamp: number, timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * 设备身份 state 文件：`<home>/.payswap/zcode/telemetry-state.json`（PaySwap 独立命名空间，
+ * 见 @zcode/shared/payswap-device-identity）。身份只锚定 OS 用户主目录，不跟随数据根配置；
+ * 不读取、不回退旧的 `~/.zcode/v2/telemetry-state.json`。
+ */
 function resolveTelemetryStateFile(homeDir?: string): string {
-  if (homeDir) {
-    return join(homeDir, ".zcode", "v2", "telemetry-state.json");
-  }
-  return join(getAppConfigDir(), "telemetry-state.json");
+  return resolvePayswapIdentityStateFile({ homeDir });
 }
 
 function resolveTelemetryLockFile(homeDir?: string): string {
-  if (homeDir) {
-    return join(homeDir, ".zcode", "v2", "telemetry-state.lock");
-  }
-  return join(getAppConfigDir(), "telemetry-state.lock");
+  return resolvePayswapIdentityLockFile({ homeDir });
 }
 
 function isFreshDailyActiveInFlight(
@@ -310,10 +312,11 @@ async function ensureDeviceMidInLockedState(
  * 确保 telemetry-state.json 里存在 deviceMid 并返回它。
  *
  * Bug 根因：远端 zcode-server 所在主机没有 Desktop main 进程，过去没有任何进程会在那里写
- * telemetry-state.json；buildZCodeSourceHeaders() 又只读不生成，于是远端发往 ZCode endpoint 的
+ * 设备身份文件；buildZCodeSourceHeaders() 又只读不生成，于是远端发往 ZCode endpoint 的
  * 请求永远缺 X-Device-Mid，billing/balance 被服务端拒绝为 parameter error，Start Plan 在远程
  * 工作区被判成未开通。这里把 telemetry 上报内部的 ensure 逻辑抽成独立入口，供远端 server 启动时
- * 调用：同一个文件、同一个字段、同一把 telemetry-state.lock，与同机 CLI 得到同一个设备身份。
+ * 调用：同一个文件（`~/.payswap/zcode/telemetry-state.json`）、同一个字段、同一把
+ * telemetry-state.lock，与同机 CLI / Desktop 得到同一个设备身份。
  */
 export function ensureTelemetryDeviceMid(
   options: EnsureTelemetryDeviceMidOptions = {},

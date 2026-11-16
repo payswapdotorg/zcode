@@ -182,8 +182,9 @@ ProviderEndpointRoutingPort.resolve
 - `X-Title`，独立 CLI/TUI 为 `Z Code@cli`，桌面 stdio Agent 为 `Z Code@electron`
 - `X-Platform`、`X-Release-Channel`、`X-Client-Language`、`X-Client-Timezone`、
   `X-Os-Category` 与有效的 `X-Os-Version`
-- 已有 `~/.zcode/v2/telemetry-state.json`（或 `ZCODE_DATA_BASE_DIR` 对应目录）中存在
-  合法 `deviceMid` 时发送 `X-Device-Mid`；配置请求不得创建新的设备身份
+- 已有 `~/.payswap/zcode/telemetry-state.json`（PaySwap 独立设备身份命名空间，按 HOME/
+  USERPROFILE 解析，不跟随 `ZCODE_DATA_BASE_DIR` 数据根）中存在合法 `deviceMid` 时发送
+  `X-Device-Mid`；配置请求不得创建新的设备身份，也不回退旧 `~/.zcode/v2` 命名空间
 - 账号请求的 `requestAuth.apiKeyId` 非空时，配置 GET 携带 `x-api-key-id`；值必须在 trim 后为可打印 ASCII。
 
 ID 来自鉴权 owner 的同一次 PAT 换证结果，通过专用参数传入，不从模型请求 Header 读取。

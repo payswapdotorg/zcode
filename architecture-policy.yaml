@@ -1844,6 +1844,13 @@ global:
   acceptedUpstreamSnapshot: scripts/architecture/upstream-snapshot.json
 
 exceptions:
+  - id: payswap-device-identity-canonical-path
+    rule: unmanaged-new-file
+    paths: [packages/shared/src/payswapDeviceIdentity.ts]
+    reason: PaySwap 设备身份命名空间的唯一路径事实源（<home>/.payswap/zcode/telemetry-state.json，
+      见 docs/zcode-endpoint-device-mid-header.md）；单文件 leaf 工具经 @zcode/shared 子路径
+      payswap-device-identity 导出，供 Desktop main、app services、远端 server 与独立 CLI 共用；
+      本次不接管整个 shared 未受管模块。
   - id: region-copy-suggested-prompts-edit
     rule: unmanaged-new-file
     paths: [packages/ui/src/v4/featureSuggestedPrompts.ts]
