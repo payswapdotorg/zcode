@@ -1097,6 +1097,18 @@ modules:
       app: .
     owner: plugin
 
+  # youtube-niche-plugin：YouTube 细分领域情报插件（stdio MCP 服务 + Niche Explorer 面板），登记方式同 office-runtime
+  - id: youtube-niche-plugin
+    roots:
+      - apps/zcode-cli/packages/youtube-niche-plugin
+    managed: true
+    requires: []
+    publicEntrypoints:
+      - apps/zcode-cli/packages/youtube-niche-plugin/contract.ts
+    layers:
+      app: .
+    owner: plugin
+
   # embedded-browser-permission：由 architecture:adopt 登记
   - id: embedded-browser-permission
     roots:
