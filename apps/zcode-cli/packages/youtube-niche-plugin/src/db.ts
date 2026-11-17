@@ -23,6 +23,9 @@ export interface NicheDatabase {
   /** Upserts a collected video snapshot (stats refresh on re-collection). */
   addVideo(nicheId: number, video: VideoRecord): boolean;
   listVideos(nicheId: number): VideoRecord[];
+  /** plugin_meta key/value store (schema version, quota ledger, …). */
+  getMeta(key: string): string | undefined;
+  setMeta(key: string, value: string): void;
   close(): void;
 }
 
@@ -135,6 +138,9 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
   const listVideosStmt = db.prepare(
     "SELECT * FROM videos WHERE niche_id = ? ORDER BY collected_at DESC, id DESC",
   );
+  const getMetaStmt = db.prepare("SELECT value FROM plugin_meta WHERE key = ?");
+  const setMetaStmt = db.prepare(`INSERT INTO plugin_meta(key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   const upsertVideo = db.prepare(`INSERT INTO videos
       (niche_id, video_id, channel_id, title, published_at, view_count, like_count, comment_count, duration_seconds, collected_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -192,6 +198,13 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
     },
     listVideos(nicheId) {
       return (listVideosStmt.all(nicheId) as VideoRow[]).map(toVideo);
+    },
+    getMeta(key) {
+      const row = getMetaStmt.get(key) as { value: string } | undefined;
+      return row ? String(row.value) : undefined;
+    },
+    setMeta(key, value) {
+      setMetaStmt.run(key, value);
     },
     close() {
       db.close();
