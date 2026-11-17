@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -8,6 +9,17 @@ import { PANEL_URI } from "#niche/contract.ts";
 import { openNicheDatabase } from "#niche/db.ts";
 import { createNicheServer } from "#niche/server.ts";
 import { YouTubeClient, type FetchLike } from "#niche/youtube/client.ts";
+import { quotaDayKey } from "#niche/youtube/quota.ts";
+import type { TokenPost } from "#niche/youtube/oauth.ts";
+import { loadTokens } from "#niche/youtube/token-store.ts";
+
+interface ConnectDeps {
+  youtube?: YouTubeClient;
+  tokenKey?: Buffer;
+  dataDir?: string;
+  clientId?: string;
+  post?: TokenPost;
+}
 
 const closers: (() => Promise<void>)[] = [];
 const dirs: string[] = [];
@@ -47,7 +59,7 @@ const fixtureFetch: FetchLike = (() => {
   };
 })();
 
-async function connect(opts: { youtube?: YouTubeClient } = {}) {
+async function connect(opts: ConnectDeps = {}) {
   const dir = mkdtempSync(join(tmpdir(), "youtube-niche-"));
   dirs.push(dir);
   const db = openNicheDatabase(dir);
@@ -55,6 +67,10 @@ async function connect(opts: { youtube?: YouTubeClient } = {}) {
     db,
     assetRoot: resolve(import.meta.dirname, "../ui"),
     ...(opts.youtube ? { youtube: opts.youtube } : {}),
+    ...(opts.tokenKey ? { tokenKey: opts.tokenKey } : {}),
+    ...(opts.dataDir ? { dataDir: opts.dataDir } : {}),
+    ...(opts.clientId ? { clientId: opts.clientId } : {}),
+    ...(opts.post ? { post: opts.post } : {}),
   });
   const client = new Client({ name: "test", version: "1" });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -192,7 +208,7 @@ describe("youtube-niche server", () => {
       arguments: { name: "budget home espresso" },
     });
     const text = textOf(result);
-    expect(text).toContain("Collected 1 videos");
+    expect(text).toContain("Collected 1 new-or-refreshed videos");
     expect(text).toContain("quota: 102/10000");
 
     const niche = db.getNiche("budget home espresso")!;
@@ -200,5 +216,117 @@ describe("youtube-niche server", () => {
     expect(videos).toHaveLength(1);
     expect(videos[0]!.title).toBe("Espresso 101");
     expect(videos[0]!.view_count).toBe(5000);
+  });
+
+  it("lists collected videos and reports quota in niche_list", async () => {
+    // Preset the ledger with the day key it itself uses (Pacific day, not UTC).
+    const map = new Map<string, string>([
+      ["youtube_quota_day", quotaDayKey(new Date())],
+      ["youtube_quota_used", "250"],
+    ]);
+    const youtube = new YouTubeClient({
+      kv: { get: (key) => map.get(key), set: (key, value) => void map.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: fixtureFetch,
+    });
+    const { client, db } = await connect({ youtube });
+    const niche = db.addNiche("budget home espresso");
+    db.addVideo(niche.id, {
+      video_id: "v1",
+      title: "Espresso 101",
+      channel_id: "c1",
+      published_at: "2026-11-10T00:00:00Z",
+      view_count: 5000,
+      like_count: 200,
+      comment_count: 50,
+      duration_seconds: 480,
+      collected_at: new Date().toISOString(),
+    });
+
+    const listed = await client.callTool({ name: "niche_list", arguments: {} });
+    const quota = (listed as { structuredContent?: { quota?: { used: number } } })
+      .structuredContent?.quota;
+    expect(quota?.used).toBe(250);
+
+    const videos = await client.callTool({
+      name: "niche_videos",
+      arguments: { name: "budget home espresso" },
+    });
+    const text = textOf(videos);
+    expect(text).toContain("1. Espresso 101");
+    expect(text).toContain("5000 views");
+    expect(text).toContain("8 min");
+
+    const untracked = await client.callTool({
+      name: "niche_videos",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("not tracked");
+
+    const empty = await connect({ youtube });
+    const emptyNiche = empty.db.addNiche("empty niche");
+    expect(emptyNiche.video_count).toBe(0);
+    const noVideos = await empty.client.callTool({
+      name: "niche_videos",
+      arguments: { name: "empty niche" },
+    });
+    expect(textOf(noVideos)).toContain("No videos collected");
+  });
+
+  it("reports an honest unconfigured state for youtube_connect", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({ name: "youtube_connect", arguments: {} });
+    expect(textOf(result)).toContain("not configured");
+    expect(textOf(result)).toContain("R2");
+
+    const finish = await client.callTool({ name: "youtube_connect_finish", arguments: {} });
+    expect(textOf(finish)).toContain("No consent flow is pending");
+  });
+
+  it("runs the two-step connect flow and stores encrypted tokens", async () => {
+    const tokenKey = randomBytes(32);
+    const dataDir = mkdtempSync(join(tmpdir(), "youtube-niche-tokens-"));
+    dirs.push(dataDir);
+    const post: TokenPost = async () => ({
+      status: 200,
+      json: {
+        access_token: "at-1",
+        refresh_token: "rt-1",
+        expires_in: 3600,
+        token_type: "Bearer",
+      },
+    });
+    const { client } = await connect({ tokenKey, dataDir, clientId: "cid", post });
+
+    const started = await client.callTool({ name: "youtube_connect", arguments: {} });
+    const structured = (started as {
+      structuredContent?: { authUrl?: string; port?: number; state?: string };
+    }).structuredContent;
+    expect(textOf(started)).toContain("Consent flow started");
+    expect(structured?.authUrl).toContain("accounts.google.com");
+
+    const state = structured!.state!;
+    const port = structured!.port!;
+    const response = await fetch(`http://127.0.0.1:${port}/callback?code=ac-1&state=${state}`);
+    expect(response.status).toBe(200);
+
+    const finished = await client.callTool({ name: "youtube_connect_finish", arguments: {} });
+    expect(textOf(finished)).toContain("YouTube connected");
+    expect(textOf(finished)).toContain("niche_collect is live");
+
+    // Round-trip: the stored file decrypts with the same key.
+    const tokens = loadTokens(dataDir, tokenKey);
+    expect(tokens?.access_token).toBe("at-1");
+    expect(tokens?.refresh_token).toBe("rt-1");
+
+    // After connecting, niche_list carries the quota of the OAuth client.
+    const listed = await client.callTool({ name: "niche_list", arguments: {} });
+    const quota = (listed as { structuredContent?: { quota?: { limit: number } } })
+      .structuredContent?.quota;
+    expect(quota?.limit).toBe(10000);
+
+    // A second connect while tokens are valid reports the existing session.
+    const again = await client.callTool({ name: "youtube_connect", arguments: {} });
+    expect(textOf(again)).toContain("already connected");
   });
 });

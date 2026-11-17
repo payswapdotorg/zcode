@@ -15,8 +15,13 @@ export async function main(): Promise<void> {
 
   // The YouTube client exists only when credentials do (R2): an API key for
   // simple access, or OAuth tokens from the encrypted store. A tampered token
-  // file degrades to "not configured" instead of crashing the server.
-  const tokenKey = tokenKeyFromEnv(process.env);
+  // file or malformed key degrades to "not configured" instead of crashing.
+  let tokenKey: Buffer | undefined;
+  try {
+    tokenKey = tokenKeyFromEnv(process.env);
+  } catch (error) {
+    console.error(`youtube-niche: ignoring token key: ${String(error)}`);
+  }
   let tokens: StoredTokens | undefined;
   if (tokenKey) {
     try {
@@ -26,6 +31,7 @@ export async function main(): Promise<void> {
     }
   }
   const apiKey = process.env.YOUTUBE_API_KEY?.trim() || undefined;
+  const clientId = process.env.YOUTUBE_CLIENT_ID?.trim() || undefined;
   const youtube =
     apiKey || tokens?.access_token
       ? new YouTubeClient({
@@ -38,7 +44,14 @@ export async function main(): Promise<void> {
         })
       : undefined;
 
-  const server = createNicheServer({ db, assetRoot, youtube });
+  const server = createNicheServer({
+    db,
+    assetRoot,
+    youtube,
+    ...(tokenKey ? { tokenKey } : {}),
+    dataDir,
+    ...(clientId ? { clientId } : {}),
+  });
   let stopping = false;
   async function close() {
     if (stopping) return;
