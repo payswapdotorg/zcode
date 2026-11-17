@@ -20,6 +20,8 @@ export interface NicheDatabase {
   getNiche(name: string): NicheRecord | undefined;
   listNiches(): NicheRecord[];
   removeNiche(name: string): boolean;
+  /** Upserts a collected channel (title refreshes on re-collection). */
+  addChannel(nicheId: number, channelId: string, title: string): boolean;
   /** Upserts a collected video snapshot (stats refresh on re-collection). */
   addVideo(nicheId: number, video: VideoRecord): boolean;
   listVideos(nicheId: number): VideoRecord[];
@@ -141,6 +143,9 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
   const getMetaStmt = db.prepare("SELECT value FROM plugin_meta WHERE key = ?");
   const setMetaStmt = db.prepare(`INSERT INTO plugin_meta(key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+  const upsertChannel = db.prepare(`INSERT INTO channels(niche_id, channel_id, title, added_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(niche_id, channel_id) DO UPDATE SET title = excluded.title`);
   const upsertVideo = db.prepare(`INSERT INTO videos
       (niche_id, video_id, channel_id, title, published_at, view_count, like_count, comment_count, duration_seconds, collected_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -179,6 +184,9 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
     },
     removeNiche(name) {
       return remove.run(name).changes > 0;
+    },
+    addChannel(nicheId, channelId, title) {
+      return upsertChannel.run(nicheId, channelId, title, new Date().toISOString()).changes > 0;
     },
     addVideo(nicheId, video) {
       return (

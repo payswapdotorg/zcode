@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PANEL_URI } from "#niche/contract.ts";
 import { openNicheDatabase } from "#niche/db.ts";
 import { createNicheServer } from "#niche/server.ts";
+import { YouTubeClient, type FetchLike } from "#niche/youtube/client.ts";
 
 const closers: (() => Promise<void>)[] = [];
 const dirs: string[] = [];
@@ -15,13 +16,45 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function connect() {
+const fixtureFetch: FetchLike = (() => {
+  const responses = [
+    {
+      status: 200,
+      body: { items: [{ id: { videoId: "v1" }, snippet: { channelId: "c1" } }] },
+    },
+    {
+      status: 200,
+      body: {
+        items: [
+          {
+            id: "v1",
+            snippet: { title: "Espresso 101", channelId: "c1", publishedAt: "2026-11-10T00:00:00Z" },
+            statistics: { viewCount: "5000", likeCount: "200", commentCount: "50" },
+            contentDetails: { duration: "PT8M" },
+          },
+        ],
+      },
+    },
+    {
+      status: 200,
+      body: { items: [{ id: "c1", snippet: { title: "Channel One" } }] },
+    },
+  ];
+  let index = 0;
+  return async () => {
+    const response = responses[Math.min(index++, responses.length - 1)]!;
+    return { status: response.status, json: async () => response.body };
+  };
+})();
+
+async function connect(opts: { youtube?: YouTubeClient } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "youtube-niche-"));
   dirs.push(dir);
   const db = openNicheDatabase(dir);
   const server = createNicheServer({
     db,
     assetRoot: resolve(import.meta.dirname, "../ui"),
+    ...(opts.youtube ? { youtube: opts.youtube } : {}),
   });
   const client = new Client({ name: "test", version: "1" });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -120,5 +153,52 @@ describe("youtube-niche server", () => {
       arguments: { name: "empty niche" },
     });
     expect(textOf(noVideos)).toContain("No videos collected");
+  });
+
+  it("reports an honest not-configured state for niche_collect without credentials", async () => {
+    const { client } = await connect();
+    const added = await client.callTool({
+      name: "niche_add",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(added)).toContain("budget home espresso");
+
+    const result = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(result)).toContain("not configured");
+    expect(textOf(result)).toContain("R2");
+
+    const untracked = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("not tracked");
+  });
+
+  it("collects videos through an injected YouTube client", async () => {
+    const map = new Map<string, string>();
+    const youtube = new YouTubeClient({
+      kv: { get: (key) => map.get(key), set: (key, value) => void map.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: fixtureFetch,
+    });
+    const { client, db } = await connect({ youtube });
+    db.addNiche("budget home espresso");
+
+    const result = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "budget home espresso" },
+    });
+    const text = textOf(result);
+    expect(text).toContain("Collected 1 videos");
+    expect(text).toContain("quota: 102/10000");
+
+    const niche = db.getNiche("budget home espresso")!;
+    const videos = db.listVideos(niche.id);
+    expect(videos).toHaveLength(1);
+    expect(videos[0]!.title).toBe("Espresso 101");
+    expect(videos[0]!.view_count).toBe(5000);
   });
 });

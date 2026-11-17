@@ -11,6 +11,13 @@ import {
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
 import { describeRanking, rankVideos } from "#niche/ranking.ts";
+import {
+  QuotaExceededError,
+  YouTubeApiError,
+  YouTubeClient,
+  YouTubeNotConfiguredError,
+} from "#niche/youtube/client.ts";
+import { collectForNiche } from "#niche/youtube/collect.ts";
 
 /** Tool results leave the server well formed even if stored text is broken. */
 const textResult = (text: string, structuredContent?: Record<string, unknown>) => ({
@@ -27,9 +34,12 @@ const surfaceMeta = {
 export function createNicheServer({
   db,
   assetRoot,
+  youtube,
 }: {
   db: NicheDatabase;
   assetRoot: string;
+  /** Constructed in main.ts only when API credentials exist; tests inject fixtures. */
+  youtube?: YouTubeClient;
 }): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: PLUGIN_VERSION });
 
@@ -132,6 +142,51 @@ export function createNicheServer({
       if (!niche) return textResult(`Niche "${name}" is not tracked.`, { niche: name, ranked: [] });
       const ranked = rankVideos(db.listVideos(niche.id), new Date()).slice(0, limit ?? 10);
       return textResult(describeRanking(niche, ranked), { niche: niche.name, ranked });
+    },
+  );
+
+  server.registerTool(
+    "niche_collect",
+    {
+      description:
+        "Discover and collect videos for a niche from the YouTube Data API (search.list 100 units + videos.list/channels.list 1 unit per 50 ids; the quota ledger refuses over-budget runs before spending). Requires API credentials (R2); without them the offline tools keep working.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(64),
+        maxResults: z.number().int().min(1).max(25).optional(),
+      },
+      annotations: { readOnlyHint: false },
+      _meta: surfaceMeta,
+    },
+    async ({ name, maxResults }) => {
+      const niche = db.getNiche(name);
+      if (!niche)
+        return textResult(`Niche "${name}" is not tracked.`, { niche: name, collected: 0 });
+      if (!youtube)
+        return textResult(
+          `YouTube API credentials are not configured yet (waiting on R2), so "${name}" cannot be collected. niche_add / niche_list / niche_rank keep working offline.`,
+          { niche: name, collected: 0, configured: false },
+        );
+      try {
+        const result = await collectForNiche(youtube, db, niche.id, niche.name, { maxResults });
+        return textResult(
+          `Collected ${result.collected} videos for "${name}" (search found ${result.found}, ${result.channels} channels; quota: ${result.quota.used}/${result.quota.limit} units used today, ${result.quota.remaining} remaining).`,
+          { ...result, configured: true },
+        );
+      } catch (error) {
+        if (
+          error instanceof YouTubeNotConfiguredError ||
+          error instanceof YouTubeApiError ||
+          error instanceof QuotaExceededError
+        ) {
+          return textResult(`niche_collect failed: ${error.message}`, {
+            niche: name,
+            collected: 0,
+            configured: true,
+            error: error.message,
+          });
+        }
+        throw error;
+      }
     },
   );
 
