@@ -18,3 +18,16 @@ export interface NicheRecord {
   channel_count: number;
   video_count: number;
 }
+
+/** One collected video snapshot; stats refresh on every re-collection (upsert). */
+export interface VideoRecord {
+  video_id: string;
+  title: string;
+  channel_id: string | null;
+  published_at: string | null;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
+  duration_seconds: number | null;
+  collected_at: string;
+}

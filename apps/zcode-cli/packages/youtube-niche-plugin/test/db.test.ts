@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { VideoRecord } from "#niche/contract.ts";
 import { NicheExistsError, openNicheDatabase, resolveNicheDataDir } from "#niche/db.ts";
 
 const dirs: string[] = [];
@@ -57,5 +58,46 @@ describe("openNicheDatabase", () => {
     const reopened = openNicheDatabase(dir);
     expect(reopened.listNiches().map((niche) => niche.name)).toEqual(["niche"]);
     reopened.close();
+  });
+
+  it("upserts videos, counts them per niche, and cascades on niche removal", () => {
+    const db = openTempDb();
+    const niche = db.addNiche("budget home espresso");
+    const second = db.addNiche("desk setups");
+    expect(db.getNiche("budget home espresso")!.id).toBe(niche.id);
+    expect(db.getNiche("missing")).toBeUndefined();
+
+    const snapshot = (over: Partial<VideoRecord> = {}): VideoRecord => ({
+      video_id: "v1",
+      title: "Old title",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00.000Z",
+      view_count: 100,
+      like_count: 5,
+      comment_count: 1,
+      duration_seconds: 300,
+      collected_at: "2026-11-16T00:00:00.000Z",
+      ...over,
+    });
+    expect(db.addVideo(niche.id, snapshot())).toBe(true);
+    // Same video_id re-collected: stats refresh instead of duplicating.
+    expect(
+      db.addVideo(
+        niche.id,
+        snapshot({ title: "New title", view_count: 250, collected_at: "2026-11-17T00:00:00.000Z" }),
+      ),
+    ).toBe(true);
+    db.addVideo(second.id, snapshot({ video_id: "other", title: "Other niche" }));
+
+    const videos = db.listVideos(niche.id);
+    expect(videos).toHaveLength(1);
+    expect(videos[0]!.title).toBe("New title");
+    expect(videos[0]!.view_count).toBe(250);
+    expect(db.listNiches().find((row) => row.id === niche.id)!.video_count).toBe(1);
+
+    db.removeNiche("budget home espresso");
+    expect(db.listVideos(niche.id)).toHaveLength(0);
+    expect(db.listVideos(second.id)).toHaveLength(1);
+    db.close();
   });
 });

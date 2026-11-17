@@ -10,6 +10,7 @@ import {
   SURFACE_ID,
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
+import { describeRanking, rankVideos } from "#niche/ranking.ts";
 
 /** Tool results leave the server well formed even if stored text is broken. */
 const textResult = (text: string, structuredContent?: Record<string, unknown>) => ({
@@ -111,6 +112,26 @@ export function createNicheServer({
         removed ? `Removed niche "${name}" and its collected data.` : `Niche "${name}" is not tracked.`,
         { removed, name },
       );
+    },
+  );
+
+  server.registerTool(
+    "niche_rank",
+    {
+      description:
+        "Rank the collected videos of a niche by growth and engagement (60% views/day + 40% engagement rate, normalized within the batch). Video collection itself lands with the YouTube API client.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(64),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true },
+      _meta: surfaceMeta,
+    },
+    async ({ name, limit }) => {
+      const niche = db.getNiche(name);
+      if (!niche) return textResult(`Niche "${name}" is not tracked.`, { niche: name, ranked: [] });
+      const ranked = rankVideos(db.listVideos(niche.id), new Date()).slice(0, limit ?? 10);
+      return textResult(describeRanking(niche, ranked), { niche: niche.name, ranked });
     },
   );
 

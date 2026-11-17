@@ -1,7 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { DB_FILE_NAME, DB_SCHEMA_VERSION, type NicheRecord } from "#niche/contract.ts";
+import {
+  DB_FILE_NAME,
+  DB_SCHEMA_VERSION,
+  type NicheRecord,
+  type VideoRecord,
+} from "#niche/contract.ts";
 
 export class NicheExistsError extends Error {
   constructor(name: string) {
@@ -12,8 +17,12 @@ export class NicheExistsError extends Error {
 
 export interface NicheDatabase {
   addNiche(name: string, notes?: string): NicheRecord;
+  getNiche(name: string): NicheRecord | undefined;
   listNiches(): NicheRecord[];
   removeNiche(name: string): boolean;
+  /** Upserts a collected video snapshot (stats refresh on re-collection). */
+  addVideo(nicheId: number, video: VideoRecord): boolean;
+  listVideos(nicheId: number): VideoRecord[];
   close(): void;
 }
 
@@ -44,6 +53,30 @@ const toNiche = (row: NicheRow): NicheRecord => ({
   created_at: String(row.created_at),
   channel_count: Number(row.channel_count ?? 0),
   video_count: Number(row.video_count ?? 0),
+});
+
+type VideoRow = {
+  video_id: string;
+  title: string;
+  channel_id: string | null;
+  published_at: string | null;
+  view_count: number | bigint | null;
+  like_count: number | bigint | null;
+  comment_count: number | bigint | null;
+  duration_seconds: number | bigint | null;
+  collected_at: string;
+};
+
+const toVideo = (row: VideoRow): VideoRecord => ({
+  video_id: String(row.video_id),
+  title: String(row.title),
+  channel_id: row.channel_id == null ? null : String(row.channel_id),
+  published_at: row.published_at == null ? null : String(row.published_at),
+  view_count: row.view_count == null ? null : Number(row.view_count),
+  like_count: row.like_count == null ? null : Number(row.like_count),
+  comment_count: row.comment_count == null ? null : Number(row.comment_count),
+  duration_seconds: row.duration_seconds == null ? null : Number(row.duration_seconds),
+  collected_at: String(row.collected_at),
 });
 
 /**
@@ -99,6 +132,21 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
       (SELECT COUNT(*) FROM videos WHERE videos.niche_id = niches.id) AS video_count
     FROM niches ORDER BY created_at DESC, niches.id DESC`);
   const remove = db.prepare("DELETE FROM niches WHERE name = ?");
+  const listVideosStmt = db.prepare(
+    "SELECT * FROM videos WHERE niche_id = ? ORDER BY collected_at DESC, id DESC",
+  );
+  const upsertVideo = db.prepare(`INSERT INTO videos
+      (niche_id, video_id, channel_id, title, published_at, view_count, like_count, comment_count, duration_seconds, collected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(niche_id, video_id) DO UPDATE SET
+      channel_id = excluded.channel_id,
+      title = excluded.title,
+      published_at = excluded.published_at,
+      view_count = excluded.view_count,
+      like_count = excluded.like_count,
+      comment_count = excluded.comment_count,
+      duration_seconds = excluded.duration_seconds,
+      collected_at = excluded.collected_at`);
 
   return {
     addNiche(name, notes) {
@@ -116,11 +164,34 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
         video_count: 0,
       };
     },
+    getNiche(name) {
+      const row = byName.get(name) as NicheRow | undefined;
+      return row ? toNiche(row) : undefined;
+    },
     listNiches() {
       return (list.all() as NicheRow[]).map(toNiche);
     },
     removeNiche(name) {
       return remove.run(name).changes > 0;
+    },
+    addVideo(nicheId, video) {
+      return (
+        upsertVideo.run(
+          nicheId,
+          video.video_id,
+          video.channel_id,
+          video.title,
+          video.published_at,
+          video.view_count,
+          video.like_count,
+          video.comment_count,
+          video.duration_seconds,
+          video.collected_at,
+        ).changes > 0
+      );
+    },
+    listVideos(nicheId) {
+      return (listVideosStmt.all(nicheId) as VideoRow[]).map(toVideo);
     },
     close() {
       db.close();
