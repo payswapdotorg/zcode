@@ -17,6 +17,7 @@
     "lint": "oxlint src test ui scripts module.ts contract.ts --no-ignore"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@types/node": "^24.0.0",
     "esbuild": "^0.25.0",

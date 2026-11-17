@@ -8,53 +8,55 @@
       html,
       body {
         margin: 0;
-        height: 100%;
+        min-height: 100%;
         font: 13px system-ui, sans-serif;
         color: #222;
         background: #fafafa;
       }
-      body {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
       .panel {
-        max-width: 440px;
-        margin: 16px;
-        padding: 24px;
+        max-width: 480px;
+        margin: 16px auto;
+        padding: 20px;
         border: 1px solid #e5e5e5;
         border-radius: 12px;
         background: #fff;
       }
       h1 {
-        margin: 0 0 10px;
-        font-size: 16px;
+        margin: 0 0 12px;
+        font-size: 15px;
       }
-      p {
-        margin: 6px 0;
-        color: #555;
-        line-height: 1.6;
+      .item {
+        padding: 10px 0;
+        border-top: 1px solid #f0f0f0;
       }
-      code {
-        padding: 1px 5px;
-        border-radius: 4px;
-        background: #f1f1f1;
+      .item .name {
+        font-weight: 600;
+      }
+      .item .meta {
+        margin-top: 2px;
+        color: #888;
         font-size: 12px;
+      }
+      .item .notes {
+        margin-top: 2px;
+        color: #555;
+      }
+      .empty,
+      .hint {
+        color: #888;
+      }
+      .error {
+        color: #b00020;
       }
     </style>
   </head>
   <body>
-    <div class="panel">
+    <div class="panel" id="root">
       <h1>Niche Explorer · 细分领域探索</h1>
-      <p>
-        YouTube niche intelligence, phase 1 scaffold: the panel surface, the stdio MCP server and
-        the niche store are wired up. Live rendering of tracked niches lands with the next commit;
-        this page is served by the plugin server as <code>ui://youtube-niche/panel.html</code>.
-      </p>
-      <p>
-        插件工具已就绪：<code>niche_add</code>、<code>niche_list</code>、<code>niche_remove</code>。
-        让 Agent 用它们添加细分领域后，此面板将展示追踪列表与排名。
-      </p>
+      <p class="empty">Loading…</p>
     </div>
+    <script>
+      /*__PANEL_BOOTSTRAP__*/
+    </script>
   </body>
 </html>
