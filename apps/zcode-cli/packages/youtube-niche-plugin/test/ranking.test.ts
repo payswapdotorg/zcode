@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { NicheRecord, VideoRecord } from "#niche/contract.ts";
+import type { NicheRecord, VideoRecord, VideoStatPoint } from "#niche/contract.ts";
 import {
   RANKING_WEIGHTS,
+  computeMomentum,
   daysSince,
   describeChannelRanking,
   describeRanking,
+  describeTrends,
   engagementRate,
   rankChannels,
   rankVideos,
@@ -188,5 +190,83 @@ describe("channel ranking", () => {
     expect(text).toContain("1. Channel One — 750 views/day avg");
     expect(text).toContain("(c2)");
     expect(describeChannelRanking(niche, [])).toContain("No videos collected");
+  });
+});
+
+describe("momentum", () => {
+  const NOW = new Date("2026-11-17T00:00:00.000Z");
+  const day = (ago: number) => new Date(NOW.getTime() - ago * 24 * 3600 * 1000).toISOString();
+  const niche: NicheRecord = {
+    id: 1,
+    name: "espresso",
+    notes: "",
+    created_at: "2026-11-01T00:00:00.000Z",
+    channel_count: 0,
+    video_count: 3,
+  };
+  const point = (videoId: string, ago: number, viewCount: number): VideoStatPoint => ({
+    video_id: videoId,
+    snapshot_at: day(ago),
+    view_count: viewCount,
+    like_count: null,
+    comment_count: null,
+  });
+  const videos: VideoRecord[] = [
+    // lifetime 10/day; snapshots say 37.5/day over the last 8 days → 3.75×.
+    video({ video_id: "hot", title: "Hot", view_count: 1000, published_at: day(100) }),
+    // lifetime 100/day, recent 100/day → steady.
+    video({ video_id: "flat", title: "Flat", view_count: 5000, published_at: day(50) }),
+    // lifetime 1000/day, recent 25/day → cooling.
+    video({ video_id: "cold", title: "Cold", view_count: 100000, published_at: day(100) }),
+  ];
+  const stats: VideoStatPoint[] = [
+    point("hot", 10, 100),
+    point("hot", 2, 400),
+    point("flat", 10, 4200),
+    point("flat", 2, 5000),
+    point("cold", 10, 99800),
+    point("cold", 2, 100000),
+  ];
+
+  it("classifies accelerating / steady / cooling and sorts by momentum", () => {
+    const rows = computeMomentum(videos, stats, NOW);
+    expect(rows.map((row) => row.trend)).toEqual(["accelerating", "steady", "cooling"]);
+    expect(rows[0]).toMatchObject({ recentVpd: 37.5, ratio: 3.75 });
+    expect(rows[0]!.lifetimeVpd).toBeCloseTo(10, 5);
+    expect(rows[1]!.ratio).toBeCloseTo(1, 5);
+    expect(rows[2]!.ratio).toBeCloseTo(0.025, 5);
+  });
+
+  it("reports insufficient for short windows, single snapshots and no view data", () => {
+    const rows = computeMomentum(
+      [video({ video_id: "short", title: "Short", view_count: 500, published_at: day(10) })],
+      [point("short", 0.25, 100), point("short", 0, 500)],
+      NOW,
+    );
+    expect(rows[0]!.trend).toBe("insufficient");
+    expect(rows[0]!.ratio).toBeNull();
+    const single = computeMomentum(
+      [video({ video_id: "once", title: "Once", view_count: 500, published_at: day(10) })],
+      [point("once", 5, 500)],
+      NOW,
+    );
+    expect(single[0]!.trend).toBe("insufficient");
+    // Stat points without view data never enter the series.
+    const noData = computeMomentum(
+      [video({ video_id: "bare", title: "Bare", view_count: null, published_at: day(10) })],
+      [{ video_id: "bare", snapshot_at: day(5), view_count: null, like_count: null, comment_count: null }],
+      NOW,
+    );
+    expect(noData[0]!.trend).toBe("insufficient");
+    expect(noData[0]!.reasons).toContain("needs ≥2 collections ≥1 day apart");
+  });
+
+  it("describes the trend report with counts and momentum lines", () => {
+    const rows = computeMomentum(videos, stats, NOW);
+    const text = describeTrends(niche, rows);
+    expect(text).toContain("Trend report for \"espresso\"");
+    expect(text).toContain("1 accelerating · 1 steady · 1 cooling · 0 insufficient");
+    expect(text).toContain("1. Hot — accelerating: lifetime 10/day → recent 38/day (3.8×)");
+    expect(describeTrends(niche, [])).toContain("No videos collected");
   });
 });

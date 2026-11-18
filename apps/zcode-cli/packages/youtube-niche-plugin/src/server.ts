@@ -12,8 +12,10 @@ import {
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
 import { exportNiche } from "#niche/export.ts";
 import {
+  computeMomentum,
   describeChannelRanking,
   describeRanking,
+  describeTrends,
   rankChannels,
   rankVideos,
 } from "#niche/ranking.ts";
@@ -354,6 +356,40 @@ export function createNicheServer({
       const titles = new Map(db.listChannels(niche.id).map((channel) => [channel.channel_id, channel.title]));
       for (const row of ranked) row.title = row.channelId ? titles.get(row.channelId) ?? row.channelId : null;
       return textResult(describeChannelRanking(niche, ranked), { niche: niche.name, channels: ranked });
+    },
+  );
+
+  server.registerTool(
+    "niche_trends",
+    {
+      description:
+        "Momentum report for a niche: compares views/day between stats snapshots (one per collection) with lifetime views/day — accelerating / steady / cooling per video, sorted by momentum. Offline: pure history math, no extra API calls; needs ≥2 collections ≥1 day apart, otherwise reports 'insufficient' honestly.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(64),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true },
+      _meta: surfaceMeta,
+    },
+    async ({ name, limit }) => {
+      const niche = db.getNiche(name);
+      if (!niche) return textResult(`Niche "${name}" is not tracked.`, { niche: name, trends: [] });
+      const momentum = computeMomentum(
+        db.listVideos(niche.id),
+        db.listVideoStats(niche.id),
+        new Date(),
+      ).slice(0, limit ?? 10);
+      return textResult(describeTrends(niche, momentum), {
+        niche: niche.name,
+        trends: momentum.map((row) => ({
+          video_id: row.video.video_id,
+          title: row.video.title,
+          trend: row.trend,
+          lifetimeVpd: row.lifetimeVpd,
+          recentVpd: row.recentVpd,
+          ratio: row.ratio,
+        })),
+      });
     },
   );
 

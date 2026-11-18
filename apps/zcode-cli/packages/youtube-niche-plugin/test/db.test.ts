@@ -122,3 +122,52 @@ describe("listChannels", () => {
     expect(db.listChannels(first.id)[0]).toMatchObject({ title: "Channel One!" });
   });
 });
+
+describe("video stats history (v2)", () => {
+  const baseVideo = {
+    video_id: "v1",
+    title: "V1",
+    channel_id: "c1",
+    published_at: "2026-11-01T00:00:00Z",
+    like_count: 10,
+    comment_count: 1,
+    duration_seconds: 60,
+  } as const;
+
+  it("records one stats point per collection with view data", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-db-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    const niche = db.addNiche("espresso");
+    db.addVideo(niche.id, { ...baseVideo, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(niche.id, { ...baseVideo, view_count: 4000, collected_at: "2026-11-17T00:00:00Z" });
+    const stats = db.listVideoStats(niche.id);
+    expect(stats).toHaveLength(2);
+    expect(stats[0]).toMatchObject({ video_id: "v1", snapshot_at: "2026-11-07T00:00:00Z", view_count: 1000 });
+    expect(stats[1]).toMatchObject({ snapshot_at: "2026-11-17T00:00:00Z", view_count: 4000 });
+    // Videos without view data record nothing.
+    db.addVideo(niche.id, {
+      ...baseVideo,
+      video_id: "v2",
+      view_count: null,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    expect(db.listVideoStats(niche.id)).toHaveLength(2);
+  });
+
+  it("stamps schema v2 and upgrades a v1 database additively", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-db-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    expect(db.getMeta("schema_version")).toBe("2");
+    db.setMeta("schema_version", "1");
+    db.close();
+    // Reopening an old-database runs the additive migration and re-stamps.
+    const reopened = openNicheDatabase(dataDir);
+    expect(reopened.getMeta("schema_version")).toBe("2");
+    const niche = reopened.addNiche("espresso");
+    reopened.addVideo(niche.id, { ...baseVideo, view_count: 10, collected_at: "2026-11-17T00:00:00Z" });
+    expect(reopened.listVideoStats(niche.id)).toHaveLength(1);
+    reopened.close();
+  });
+});

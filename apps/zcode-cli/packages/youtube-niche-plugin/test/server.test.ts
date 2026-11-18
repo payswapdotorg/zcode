@@ -486,3 +486,65 @@ describe("niche_channels tool", () => {
     expect(textOf(empty)).toContain("No videos collected");
   });
 });
+
+describe("niche_trends tool", () => {
+  it("reports accelerating momentum from two collections", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    const base = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(added.id, { ...base, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(added.id, { ...base, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "espresso" },
+    });
+    const text = textOf(result);
+    expect(text).toContain("Trend report for \"espresso\"");
+    expect(text).toContain("1 accelerating · 0 steady · 0 cooling · 0 insufficient");
+    expect(text).toContain("1. Heating up — accelerating:");
+    const structured = (result as {
+      structuredContent?: { trends?: Array<{ video_id: string; trend: string; ratio?: number }> };
+    }).structuredContent;
+    expect(structured?.trends?.[0]).toMatchObject({ video_id: "v1", trend: "accelerating" });
+    expect(structured?.trends?.[0]!.ratio).toBeGreaterThan(1.3);
+  });
+
+  it("reports insufficient honestly after a single collection", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "Fresh",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      view_count: 500,
+      like_count: 0,
+      comment_count: 0,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("0 accelerating · 0 steady · 0 cooling · 1 insufficient");
+    expect(textOf(result)).toContain("needs ≥2 collections ≥1 day apart");
+  });
+
+  it("refuses unknown niches", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(result)).toContain("is not tracked");
+  });
+});

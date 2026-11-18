@@ -8,7 +8,7 @@ export const HTML_MIME = "text/html";
 /** File name of the plugin's sqlite database inside its data directory. */
 export const DB_FILE_NAME = "niche.db";
 /** Schema version stamped into plugin_meta; migrations stay additive-only. */
-export const DB_SCHEMA_VERSION = "1";
+export const DB_SCHEMA_VERSION = "2";
 
 export interface NicheRecord {
   id: number;
@@ -36,4 +36,16 @@ export interface VideoRecord {
 export interface ChannelRecord {
   channel_id: string;
   title: string;
+}
+
+/**
+ * One historical stats snapshot of a video, recorded on every collection
+ * (v2). Trend math reads the series; the videos table keeps only the latest.
+ */
+export interface VideoStatPoint {
+  video_id: string;
+  snapshot_at: string;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
 }

@@ -1,4 +1,4 @@
-import type { NicheRecord, VideoRecord } from "#niche/contract.ts";
+import type { NicheRecord, VideoRecord, VideoStatPoint } from "#niche/contract.ts";
 
 /**
  * Local ranking for collected videos — no network, no API: the score is a
@@ -154,6 +154,100 @@ export function describeChannelRanking(
   const lines = ranked.map(
     (row, index) =>
       `${index + 1}. ${row.title ?? row.channelId ?? "unknown"} — ${row.reasons.join(" · ")} (${row.channelId ?? "unknown"})`,
+  );
+  return [header, ...lines].join("\n");
+}
+
+/** Trend classification thresholds: recent vs lifetime views/day. */
+export const MOMENTUM_THRESHOLDS = {
+  /** recentVpd at or above this multiple of lifetimeVpd counts as accelerating. */
+  accelerating: 1.3,
+  /** At or below this multiple counts as cooling. */
+  cooling: 0.7,
+  /** Snapshots closer than this cannot carry a meaningful views/day delta. */
+  minWindowDays: 1,
+} as const;
+
+export type TrendClassification = "accelerating" | "steady" | "cooling" | "insufficient";
+
+export interface VideoMomentum {
+  video: VideoRecord;
+  /** Views/day since publish (null without view or publish data). */
+  lifetimeVpd: number | null;
+  /** Views/day across the snapshot window; null under two usable snapshots or a short window. */
+  recentVpd: number | null;
+  /** recentVpd / lifetimeVpd; null when either side is missing or lifetime is 0. */
+  ratio: number | null;
+  trend: TrendClassification;
+  reasons: string[];
+}
+
+/**
+ * Momentum per video: compares the views/day observed between the first and
+ * last stats snapshots (recent) with the lifetime views/day since publish.
+ * Needs at least two collections at least minWindowDays apart — a single
+ * collection honestly reports "insufficient" instead of guessing.
+ */
+export function computeMomentum(
+  videos: readonly VideoRecord[],
+  stats: readonly VideoStatPoint[],
+  now: Date,
+): VideoMomentum[] {
+  const series = new Map<string, VideoStatPoint[]>();
+  for (const point of stats) {
+    if (point.view_count == null) continue;
+    const bucket = series.get(point.video_id);
+    if (bucket) bucket.push(point);
+    else series.set(point.video_id, [point]);
+  }
+  for (const bucket of series.values())
+    bucket.sort((a, b) => a.snapshot_at.localeCompare(b.snapshot_at));
+
+  const rows = videos.map((video) => {
+    const lifetimeVpd = viewsPerDay(video, now);
+    const points = series.get(video.video_id) ?? [];
+    let recentVpd: number | null = null;
+    if (points.length >= 2) {
+      const first = points[0]!;
+      const last = points[points.length - 1]!;
+      const windowDays =
+        (new Date(last.snapshot_at).getTime() - new Date(first.snapshot_at).getTime()) / DAY_MS;
+      if (Number.isFinite(windowDays) && windowDays >= MOMENTUM_THRESHOLDS.minWindowDays)
+        recentVpd = (last.view_count! - first.view_count!) / windowDays;
+    }
+    const ratio =
+      recentVpd != null && lifetimeVpd != null && lifetimeVpd > 0
+        ? recentVpd / lifetimeVpd
+        : null;
+    const trend: TrendClassification =
+      ratio == null
+        ? "insufficient"
+        : ratio >= MOMENTUM_THRESHOLDS.accelerating
+          ? "accelerating"
+          : ratio <= MOMENTUM_THRESHOLDS.cooling
+            ? "cooling"
+            : "steady";
+    const reasons =
+      ratio == null
+        ? ["needs ≥2 collections ≥1 day apart"]
+        : [
+            `lifetime ${Math.round(lifetimeVpd!).toLocaleString("en-US")}/day → recent ${Math.round(recentVpd!).toLocaleString("en-US")}/day (${ratio.toFixed(1)}×)`,
+          ];
+    return { video, lifetimeVpd, recentVpd, ratio, trend, reasons };
+  });
+  return rows.sort((a, b) => (b.ratio ?? -Infinity) - (a.ratio ?? -Infinity));
+}
+
+/** Model-facing trend report: counts plus per-video momentum lines. */
+export function describeTrends(niche: NicheRecord, momentum: readonly VideoMomentum[]): string {
+  if (!momentum.length)
+    return `No videos collected for "${niche.name}" yet; trends appear after collections build history.`;
+  const counts = new Map<TrendClassification, number>();
+  for (const row of momentum) counts.set(row.trend, (counts.get(row.trend) ?? 0) + 1);
+  const summary = `${counts.get("accelerating") ?? 0} accelerating · ${counts.get("steady") ?? 0} steady · ${counts.get("cooling") ?? 0} cooling · ${counts.get("insufficient") ?? 0} insufficient`;
+  const header = `Trend report for "${niche.name}" (recent vs lifetime views/day, ≥${MOMENTUM_THRESHOLDS.accelerating}× accelerating, ≤${MOMENTUM_THRESHOLDS.cooling}× cooling): ${summary}`;
+  const lines = momentum.map(
+    (row, index) => `${index + 1}. ${row.video.title} — ${row.trend}: ${row.reasons.join(" · ")} (${row.video.video_id})`,
   );
   return [header, ...lines].join("\n");
 }

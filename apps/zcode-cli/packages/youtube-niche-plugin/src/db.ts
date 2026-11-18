@@ -7,6 +7,7 @@ import {
   type ChannelRecord,
   type NicheRecord,
   type VideoRecord,
+  type VideoStatPoint,
 } from "#niche/contract.ts";
 
 export class NicheExistsError extends Error {
@@ -28,6 +29,8 @@ export interface NicheDatabase {
   /** Upserts a collected video snapshot (stats refresh on re-collection). */
   addVideo(nicheId: number, video: VideoRecord): boolean;
   listVideos(nicheId: number): VideoRecord[];
+  /** Per-collection stats history of a niche (trend math input, v2). */
+  listVideoStats(nicheId: number): VideoStatPoint[];
   /** plugin_meta key/value store (schema version, quota ledger, …). */
   getMeta(key: string): string | undefined;
   setMeta(key: string, value: string): void;
@@ -100,7 +103,7 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
   db.exec("CREATE TABLE IF NOT EXISTS plugin_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   db.exec(
     `INSERT INTO plugin_meta(key, value) VALUES ('schema_version', '${DB_SCHEMA_VERSION}')
-     ON CONFLICT(key) DO NOTHING`,
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   );
   db.exec(`CREATE TABLE IF NOT EXISTS niches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +133,18 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
     collected_at TEXT NOT NULL,
     UNIQUE (niche_id, video_id)
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS video_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    niche_id INTEGER NOT NULL REFERENCES niches(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL,
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER
+  )`);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS video_stats_niche_video ON video_stats(niche_id, video_id, snapshot_at)",
+  );
 
   const insert = db.prepare(
     "INSERT INTO niches(name, notes, created_at) VALUES (?, ?, ?)",
@@ -164,6 +179,12 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
       comment_count = excluded.comment_count,
       duration_seconds = excluded.duration_seconds,
       collected_at = excluded.collected_at`);
+  const insertStat = db.prepare(`INSERT INTO video_stats
+    (niche_id, video_id, snapshot_at, view_count, like_count, comment_count)
+    VALUES (?, ?, ?, ?, ?, ?)`);
+  const listStatsStmt = db.prepare(
+    "SELECT video_id, snapshot_at, view_count, like_count, comment_count FROM video_stats WHERE niche_id = ? ORDER BY video_id, snapshot_at, id",
+  );
 
   return {
     addNiche(name, notes) {
@@ -201,7 +222,7 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
       }>).map((row) => ({ channel_id: String(row.channel_id), title: String(row.title) }));
     },
     addVideo(nicheId, video) {
-      return (
+      const changed =
         upsertVideo.run(
           nicheId,
           video.video_id,
@@ -213,8 +234,34 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
           video.comment_count,
           video.duration_seconds,
           video.collected_at,
-        ).changes > 0
-      );
+        ).changes > 0;
+      // History: one stats point per collection run that carried view data,
+      // so trend math can compare windows across collections.
+      if (video.view_count != null)
+        insertStat.run(
+          nicheId,
+          video.video_id,
+          video.collected_at,
+          video.view_count,
+          video.like_count,
+          video.comment_count,
+        );
+      return changed;
+    },
+    listVideoStats(nicheId) {
+      return (listStatsStmt.all(nicheId) as Array<{
+        video_id: string;
+        snapshot_at: string;
+        view_count: number | bigint | null;
+        like_count: number | bigint | null;
+        comment_count: number | bigint | null;
+      }>).map((row) => ({
+        video_id: String(row.video_id),
+        snapshot_at: String(row.snapshot_at),
+        view_count: row.view_count == null ? null : Number(row.view_count),
+        like_count: row.like_count == null ? null : Number(row.like_count),
+        comment_count: row.comment_count == null ? null : Number(row.comment_count),
+      }));
     },
     listVideos(nicheId) {
       return (listVideosStmt.all(nicheId) as VideoRow[]).map(toVideo);
