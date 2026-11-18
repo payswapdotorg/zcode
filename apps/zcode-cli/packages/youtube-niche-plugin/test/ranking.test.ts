@@ -3,8 +3,10 @@ import type { NicheRecord, VideoRecord } from "#niche/contract.ts";
 import {
   RANKING_WEIGHTS,
   daysSince,
+  describeChannelRanking,
   describeRanking,
   engagementRate,
+  rankChannels,
   rankVideos,
   viewsPerDay,
 } from "#niche/ranking.ts";
@@ -122,5 +124,69 @@ describe("rankVideos", () => {
     expect(text).toContain("1. Espresso on a budget");
     expect(text).toContain("(abc123)");
     expect(describeRanking(niche, [])).toContain("No videos collected");
+  });
+});
+
+describe("channel ranking", () => {
+  const NOW = new Date("2026-11-17T00:00:00.000Z");
+  const niche: NicheRecord = {
+    id: 1,
+    name: "espresso",
+    notes: "",
+    created_at: "2026-11-01T00:00:00.000Z",
+    channel_count: 2,
+    video_count: 3,
+  };
+  const day = (ago: number) => new Date(NOW.getTime() - ago * 24 * 3600 * 1000).toISOString();
+  const videos: VideoRecord[] = [
+    // c1: two solid videos — dominates avg views/day, moderate engagement.
+    video({ video_id: "a", channel_id: "c1", view_count: 10000, like_count: 500, comment_count: 100, published_at: day(10) }),
+    video({ video_id: "b", channel_id: "c1", view_count: 5000, like_count: 100, comment_count: 0, published_at: day(10) }),
+    // c2: one small but hyper-engaged video.
+    video({ video_id: "c", channel_id: "c2", view_count: 100, like_count: 50, comment_count: 50, published_at: day(10) }),
+  ];
+
+  it("groups, aggregates and orders channels (velocity wins at 60%)", () => {
+    const ranked = rankChannels(videos, NOW);
+    expect(ranked.map((row) => row.channelId)).toEqual(["c1", "c2"]);
+    expect(ranked[0]).toMatchObject({
+      videoCount: 2,
+      totalViews: 15000,
+      viewsPerDay: 750,
+      title: null,
+    });
+    // Channel engagement pools the channel's totals: (600 likes + 100 comments) / 15000.
+    expect(ranked[0]!.engagementRate).toBeCloseTo(700 / 15000, 5);
+    expect(ranked[0]!.score).toBeCloseTo(
+      RANKING_WEIGHTS.velocity + RANKING_WEIGHTS.engagement * (700 / 15000),
+      5,
+    );
+    expect(ranked[1]!.engagementRate).toBeCloseTo(1, 5);
+    expect(ranked[1]!.score).toBeCloseTo(
+      RANKING_WEIGHTS.velocity * (10 / 750) + RANKING_WEIGHTS.engagement,
+      5,
+    );
+  });
+
+  it("reports per-channel reasons and pools null channel ids into one bucket", () => {
+    const ranked = rankChannels(
+      [...videos, video({ video_id: "d", channel_id: null, view_count: 0 })],
+      NOW,
+    );
+    const unknown = ranked.find((row) => row.channelId === null);
+    expect(unknown?.reasons).toContain("no view data");
+    expect(unknown?.reasons).toContain("1 video");
+    expect(ranked[0]!.reasons).toContain("750 views/day avg");
+    expect(ranked[0]!.reasons).toContain("2 videos");
+  });
+
+  it("describes the leaderboard with joined titles and honest fallbacks", () => {
+    const ranked = rankChannels(videos, NOW);
+    ranked[0]!.title = "Channel One";
+    const text = describeChannelRanking(niche, ranked);
+    expect(text).toContain("Channel leaders for \"espresso\"");
+    expect(text).toContain("1. Channel One — 750 views/day avg");
+    expect(text).toContain("(c2)");
+    expect(describeChannelRanking(niche, [])).toContain("No videos collected");
   });
 });

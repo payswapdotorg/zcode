@@ -11,7 +11,12 @@ import {
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
 import { exportNiche } from "#niche/export.ts";
-import { describeRanking, rankVideos } from "#niche/ranking.ts";
+import {
+  describeChannelRanking,
+  describeRanking,
+  rankChannels,
+  rankVideos,
+} from "#niche/ranking.ts";
 import {
   QuotaExceededError,
   YouTubeApiError,
@@ -325,6 +330,30 @@ export function createNicheServer({
           format,
         },
       );
+    },
+  );
+
+  server.registerTool(
+    "niche_channels",
+    {
+      description:
+        "Rank the channels of a niche by dominance in the collected data — avg views/day per video plus channel-level engagement, same weights as niche_rank. Offline: no extra API calls, grouped from what is already collected.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(64),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true },
+      _meta: surfaceMeta,
+    },
+    async ({ name, limit }) => {
+      const niche = db.getNiche(name);
+      if (!niche)
+        return textResult(`Niche "${name}" is not tracked.`, { niche: name, channels: [] });
+      const ranked = rankChannels(db.listVideos(niche.id), new Date()).slice(0, limit ?? 10);
+      // Join display titles from the channels table; unknown ids stay honest.
+      const titles = new Map(db.listChannels(niche.id).map((channel) => [channel.channel_id, channel.title]));
+      for (const row of ranked) row.title = row.channelId ? titles.get(row.channelId) ?? row.channelId : null;
+      return textResult(describeChannelRanking(niche, ranked), { niche: niche.name, channels: ranked });
     },
   );
 

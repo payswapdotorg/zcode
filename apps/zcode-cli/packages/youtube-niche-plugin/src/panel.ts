@@ -6,9 +6,10 @@ import {
 } from "#niche/contract.ts";
 import {
   PANEL_TEXT,
+  channelRows,
   formatQuota,
   nicheItems,
-  videoRows,
+  rankedVideoRows,
   type QuotaInfo,
 } from "#niche/panel-format.ts";
 
@@ -20,15 +21,26 @@ interface NicheListResult {
   };
 }
 
-interface NicheVideosResult {
+interface NicheRankResult {
   isError?: boolean;
   structuredContent?: {
-    videos?: Array<{
-      video_id: string;
-      title: string;
-      view_count: number | null;
-      like_count: number | null;
-      duration_seconds: number | null;
+    ranked?: Array<{
+      video: { title?: unknown };
+      viewsPerDay?: unknown;
+      score?: unknown;
+    }>;
+  };
+}
+
+interface NicheChannelsResult {
+  isError?: boolean;
+  structuredContent?: {
+    channels?: Array<{
+      title?: unknown;
+      channelId?: unknown;
+      videoCount?: unknown;
+      totalViews?: unknown;
+      score?: unknown;
     }>;
   };
 }
@@ -108,6 +120,17 @@ function renderQuota(card: HTMLElement, quota: QuotaInfo | undefined): void {
   text(card, "quota-text", formatQuota(quota));
 }
 
+/** One score bar: track div + fill div sized by the formatted width. */
+function scoreBar(barWidth: string): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const fill = document.createElement("div");
+  fill.className = "bar-fill";
+  fill.style.width = barWidth;
+  bar.append(fill);
+  return bar;
+}
+
 async function appendVideos(row: HTMLElement, name: string): Promise<void> {
   const holder = document.createElement("div");
   holder.className = "videos";
@@ -115,33 +138,37 @@ async function appendVideos(row: HTMLElement, name: string): Promise<void> {
   text(holder, "meta", "…");
   try {
     const result = (await app.callServerTool({
-      name: "niche_videos",
-      arguments: { name },
-    })) as NicheVideosResult;
-    const videos = result.isError ? undefined : result.structuredContent?.videos;
+      name: "niche_rank",
+      arguments: { name, limit: 10 },
+    })) as NicheRankResult;
+    const ranked = result.isError ? undefined : result.structuredContent?.ranked;
     holder.replaceChildren();
-    if (!videos || !videos.length) {
+    if (!ranked || !ranked.length) {
       text(holder, "meta", PANEL_TEXT.videosEmpty);
       return;
     }
     const table = document.createElement("table");
     const head = document.createElement("tr");
-    for (const label of ["标题", "views", "likes", "时长"]) {
+    for (const label of ["#", "标题", "views/day", "潜力分"]) {
       const th = document.createElement("th");
       th.textContent = label;
       head.append(th);
     }
     table.append(head);
-    for (const video of videoRows(videos)) {
+    for (const video of rankedVideoRows(ranked)) {
       const tr = document.createElement("tr");
-      for (const cell of [video.title, video.views, video.likes, video.duration]) {
+      for (const cell of [video.rank, video.title, video.viewsPerDay]) {
         const td = document.createElement("td");
         td.textContent = cell;
         tr.append(td);
       }
+      const scoreCell = document.createElement("td");
+      scoreCell.append(scoreBar(video.barWidth));
+      tr.append(scoreCell);
       table.append(tr);
     }
     holder.append(table);
+    await appendChannels(holder, name);
     // CSV export of exactly what is collected; the click must not bubble
     // into the row toggle that would collapse the detail view.
     const exportBtn = document.createElement("button");
@@ -170,6 +197,34 @@ async function appendVideos(row: HTMLElement, name: string): Promise<void> {
   } catch {
     holder.replaceChildren();
     text(holder, "error", PANEL_TEXT.videosFailed);
+  }
+}
+
+/** Channel leaderboard under the video ranking; skipped silently when empty. */
+async function appendChannels(holder: HTMLElement, name: string): Promise<void> {
+  try {
+    const result = (await app.callServerTool({
+      name: "niche_channels",
+      arguments: { name, limit: 5 },
+    })) as NicheChannelsResult;
+    const channels = result.isError ? undefined : result.structuredContent?.channels;
+    if (!channels || !channels.length) return;
+    const section = document.createElement("div");
+    section.className = "channels";
+    text(section, "channels-title", PANEL_TEXT.channelsTitle);
+    for (const channel of channelRows(channels)) {
+      const line = document.createElement("div");
+      line.className = "channel-row";
+      const labels = document.createElement("div");
+      labels.className = "channel-labels";
+      text(labels, "channel-title", channel.title);
+      text(labels, "channel-meta", channel.meta);
+      line.append(labels, scoreBar(channel.barWidth));
+      section.append(line);
+    }
+    holder.append(section);
+  } catch {
+    // The leaderboard is a bonus; the ranked table above already succeeded.
   }
 }
 

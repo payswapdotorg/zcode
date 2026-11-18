@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   DB_FILE_NAME,
   DB_SCHEMA_VERSION,
+  type ChannelRecord,
   type NicheRecord,
   type VideoRecord,
 } from "#niche/contract.ts";
@@ -22,6 +23,8 @@ export interface NicheDatabase {
   removeNiche(name: string): boolean;
   /** Upserts a collected channel (title refreshes on re-collection). */
   addChannel(nicheId: number, channelId: string, title: string): boolean;
+  /** Tracked channels of a niche (insertion order); stats are computed on demand. */
+  listChannels(nicheId: number): ChannelRecord[];
   /** Upserts a collected video snapshot (stats refresh on re-collection). */
   addVideo(nicheId: number, video: VideoRecord): boolean;
   listVideos(nicheId: number): VideoRecord[];
@@ -146,6 +149,9 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
   const upsertChannel = db.prepare(`INSERT INTO channels(niche_id, channel_id, title, added_at)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(niche_id, channel_id) DO UPDATE SET title = excluded.title`);
+  const listChannelsStmt = db.prepare(
+    "SELECT channel_id, title FROM channels WHERE niche_id = ? ORDER BY id",
+  );
   const upsertVideo = db.prepare(`INSERT INTO videos
       (niche_id, video_id, channel_id, title, published_at, view_count, like_count, comment_count, duration_seconds, collected_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -187,6 +193,12 @@ export function openNicheDatabase(dataDir: string): NicheDatabase {
     },
     addChannel(nicheId, channelId, title) {
       return upsertChannel.run(nicheId, channelId, title, new Date().toISOString()).changes > 0;
+    },
+    listChannels(nicheId) {
+      return (listChannelsStmt.all(nicheId) as Array<{
+        channel_id: string;
+        title: string;
+      }>).map((row) => ({ channel_id: String(row.channel_id), title: String(row.title) }));
     },
     addVideo(nicheId, video) {
       return (

@@ -101,3 +101,24 @@ describe("openNicheDatabase", () => {
     db.close();
   });
 });
+
+describe("listChannels", () => {
+  it("lists tracked channels per niche and refreshes titles on re-add", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-db-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    const first = db.addNiche("espresso");
+    const second = db.addNiche("other");
+    db.addChannel(first.id, "c1", "Channel One");
+    db.addChannel(first.id, "c2", "Channel Two");
+    db.addChannel(second.id, "c3", "Elsewhere");
+    expect(db.listChannels(first.id)).toEqual([
+      { channel_id: "c1", title: "Channel One" },
+      { channel_id: "c2", title: "Channel Two" },
+    ]);
+    // Upsert refreshes the title without duplicating the row.
+    db.addChannel(first.id, "c1", "Channel One!");
+    expect(db.listChannels(first.id)).toHaveLength(2);
+    expect(db.listChannels(first.id)[0]).toMatchObject({ title: "Channel One!" });
+  });
+});

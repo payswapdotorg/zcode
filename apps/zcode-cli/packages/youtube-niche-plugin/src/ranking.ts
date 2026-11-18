@@ -76,3 +76,84 @@ export function describeRanking(niche: NicheRecord, ranked: readonly ScoredVideo
   );
   return [header, ...lines].join("\n");
 }
+
+export interface ScoredChannel {
+  channelId: string | null;
+  /** Display title; null until the caller joins listChannels (null → channelId). */
+  title: string | null;
+  videoCount: number;
+  totalViews: number;
+  /** Mean of per-video views/day (videos without view data are excluded). */
+  viewsPerDay: number;
+  /** (total likes + comments) / total views across the channel's videos. */
+  engagementRate: number;
+  /** 0..1 within the ranked batch, same weights as video scoring. */
+  score: number;
+  reasons: string[];
+}
+
+/**
+ * Ranks the channels of a niche from its collected videos — no network, no
+ * extra API calls: groups listVideos output by channel_id (null groups into
+ * one "unknown" bucket) and scores each channel by the mean views/day of its
+ * videos plus channel-level engagement, normalized within the batch with the
+ * same weights as video scoring.
+ */
+export function rankChannels(videos: readonly VideoRecord[], now: Date): ScoredChannel[] {
+  const groups = new Map<string | null, VideoRecord[]>();
+  for (const video of videos) {
+    const bucket = groups.get(video.channel_id);
+    if (bucket) bucket.push(video);
+    else groups.set(video.channel_id, [video]);
+  }
+  const rows = [...groups.entries()].map(([channelId, channelVideos]) => {
+    const withViews = channelVideos.filter((video) => (video.view_count ?? 0) > 0);
+    const totalViews = channelVideos.reduce((sum, video) => sum + (video.view_count ?? 0), 0);
+    const totalLikes = channelVideos.reduce((sum, video) => sum + (video.like_count ?? 0), 0);
+    const totalComments = channelVideos.reduce((sum, video) => sum + (video.comment_count ?? 0), 0);
+    const vpd =
+      withViews.length > 0
+        ? withViews.reduce((sum, video) => sum + (viewsPerDay(video, now) ?? 0), 0) /
+          withViews.length
+        : 0;
+    const engagement = totalViews > 0 ? (totalLikes + totalComments) / totalViews : 0;
+    const reasons: string[] = [];
+    if (withViews.length > 0)
+      reasons.push(`${Math.round(vpd).toLocaleString("en-US")} views/day avg`);
+    else reasons.push("no view data");
+    if (totalViews > 0) reasons.push(`${(engagement * 100).toFixed(1)}% engagement`);
+    reasons.push(`${channelVideos.length} video${channelVideos.length === 1 ? "" : "s"}`);
+    return { channelId, channelVideos, vpd, engagement, totalViews, reasons };
+  });
+  const vpdMax = Math.max(0, ...rows.map((row) => row.vpd));
+  const engMax = Math.max(0, ...rows.map((row) => row.engagement));
+  return rows
+    .map((row) => ({
+      channelId: row.channelId,
+      title: null,
+      videoCount: row.channelVideos.length,
+      totalViews: row.totalViews,
+      viewsPerDay: row.vpd,
+      engagementRate: row.engagement,
+      score:
+        RANKING_WEIGHTS.velocity * (vpdMax > 0 ? row.vpd / vpdMax : 0) +
+        RANKING_WEIGHTS.engagement * (engMax > 0 ? row.engagement / engMax : 0),
+      reasons: row.reasons,
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+/** Model-facing summary of a channel leaderboard (titles joined by the caller). */
+export function describeChannelRanking(
+  niche: NicheRecord,
+  ranked: readonly ScoredChannel[],
+): string {
+  if (!ranked.length)
+    return `No videos collected for "${niche.name}" yet; channel leaders appear after the first collection.`;
+  const header = `Channel leaders for "${niche.name}" (score = ${RANKING_WEIGHTS.velocity}·avg views/day + ${RANKING_WEIGHTS.engagement}·engagement, normalized):`;
+  const lines = ranked.map(
+    (row, index) =>
+      `${index + 1}. ${row.title ?? row.channelId ?? "unknown"} — ${row.reasons.join(" · ")} (${row.channelId ?? "unknown"})`,
+  );
+  return [header, ...lines].join("\n");
+}

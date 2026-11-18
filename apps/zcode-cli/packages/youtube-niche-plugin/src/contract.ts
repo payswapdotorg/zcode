@@ -31,3 +31,9 @@ export interface VideoRecord {
   duration_seconds: number | null;
   collected_at: string;
 }
+
+/** A tracked channel of a niche; per-channel stats are computed, not stored. */
+export interface ChannelRecord {
+  channel_id: string;
+  title: string;
+}

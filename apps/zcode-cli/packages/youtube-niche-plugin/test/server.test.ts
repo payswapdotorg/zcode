@@ -412,3 +412,77 @@ describe("niche_export tool", () => {
     expect(textOf(result)).toContain("data directory");
   });
 });
+
+describe("niche_channels tool", () => {
+  it("ranks channels with joined titles from the channels table", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addChannel(added.id, "c1", "Channel One");
+    db.addChannel(added.id, "c2", "Channel Two");
+    const video = (videoId: string, channelId: string, viewCount: number, likeCount: number) =>
+      db.addVideo(added.id, {
+        video_id: videoId,
+        title: `V ${videoId}`,
+        channel_id: channelId,
+        published_at: "2026-11-07T00:00:00Z",
+        view_count: viewCount,
+        like_count: likeCount,
+        comment_count: 0,
+        duration_seconds: 60,
+        collected_at: "2026-11-17T00:00:00Z",
+      });
+    video("a", "c1", 10000, 500);
+    video("b", "c1", 5000, 100);
+    video("c", "c2", 100, 50);
+    const result = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("Channel leaders for \"espresso\"");
+    expect(textOf(result)).toContain("1. Channel One —");
+    const structured = (result as {
+      structuredContent?: { channels?: Array<{ title?: string; channelId?: string; videoCount?: number }> };
+    }).structuredContent;
+    expect(structured?.channels?.[0]).toMatchObject({
+      channelId: "c1",
+      title: "Channel One",
+      videoCount: 2,
+    });
+  });
+
+  it("falls back to channel ids when no title was collected", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "V1",
+      channel_id: "raw-id",
+      published_at: "2026-11-07T00:00:00Z",
+      view_count: 100,
+      like_count: 1,
+      comment_count: 0,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("(raw-id)");
+  });
+
+  it("refuses unknown niches and empty niches honestly", async () => {
+    const { client, db } = await connect();
+    const untracked = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("is not tracked");
+    db.addNiche("empty");
+    const empty = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "empty" },
+    });
+    expect(textOf(empty)).toContain("No videos collected");
+  });
+});

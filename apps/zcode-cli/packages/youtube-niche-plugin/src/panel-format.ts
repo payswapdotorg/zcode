@@ -14,6 +14,7 @@ export const PANEL_TEXT = {
   connectPrompt: "YouTube 待授权：在浏览器打开以下链接完成同意，然后让 agent 调用 youtube_connect_finish。",
   videosEmpty: "该领域还没有采集到视频（等待 R2 后由 niche_collect 填充）。",
   videosFailed: "视频明细加载失败",
+  channelsTitle: "频道榜 · Channel leaders",
   exportLabel: "导出 CSV",
   exportDone: "已导出",
   exportFailed: "导出失败",
@@ -29,31 +30,58 @@ export function formatQuota(quota: QuotaInfo): string {
   return `${PANEL_TEXT.quotaLabel} ${quota.used} / ${quota.limit}（剩余 ${quota.remaining}）`;
 }
 
-export function formatDuration(seconds: number | null): string {
-  return seconds == null ? "—" : `${Math.round(seconds / 60)} min`;
+/** Score bar width: clamp to 0..1 (ranked scores live there, be safe anyway). */
+export function scoreBarWidth(score: number): string {
+  const clamped = Math.min(1, Math.max(0, Number.isFinite(score) ? score : 0));
+  return `${Math.round(clamped * 100)}%`;
 }
 
-export interface CollectedVideo {
-  video_id: string;
+const formatPerDay = (value: number): string =>
+  value >= 100 ? Math.round(value).toLocaleString("en-US") : String(Math.round(value * 10) / 10);
+
+export interface RankedRow {
+  rank: string;
   title: string;
-  view_count: number | null;
-  like_count: number | null;
-  duration_seconds: number | null;
+  viewsPerDay: string;
+  barWidth: string;
 }
 
-export interface VideoRow {
+/** Rows for the ranked video table (niche_rank structured output, read structurally). */
+export function rankedVideoRows(
+  ranked: ReadonlyArray<{
+    video: { title?: unknown };
+    viewsPerDay?: unknown;
+    score?: unknown;
+  }>,
+): RankedRow[] {
+  return ranked.map((row, index) => ({
+    rank: String(index + 1),
+    title: String(row.video.title ?? ""),
+    viewsPerDay: `${formatPerDay(Number(row.viewsPerDay) || 0)}/day`,
+    barWidth: scoreBarWidth(Number(row.score) || 0),
+  }));
+}
+
+export interface ChannelRow {
   title: string;
-  views: string;
-  likes: string;
-  duration: string;
+  meta: string;
+  barWidth: string;
 }
 
-export function videoRows(videos: readonly CollectedVideo[]): VideoRow[] {
-  return videos.map((video) => ({
-    title: video.title,
-    views: String(video.view_count ?? 0),
-    likes: String(video.like_count ?? 0),
-    duration: formatDuration(video.duration_seconds),
+/** Rows for the channel leaderboard (niche_channels structured output, read structurally). */
+export function channelRows(
+  channels: ReadonlyArray<{
+    title?: unknown;
+    channelId?: unknown;
+    videoCount?: unknown;
+    totalViews?: unknown;
+    score?: unknown;
+  }>,
+): ChannelRow[] {
+  return channels.map((channel) => ({
+    title: String(channel.title ?? channel.channelId ?? "unknown"),
+    meta: `${Number(channel.videoCount) || 0} 视频 · ${(Number(channel.totalViews) || 0).toLocaleString("en-US")} views`,
+    barWidth: scoreBarWidth(Number(channel.score) || 0),
   }));
 }
 
