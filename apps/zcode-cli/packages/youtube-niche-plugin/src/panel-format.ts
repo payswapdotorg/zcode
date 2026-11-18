@@ -17,6 +17,7 @@ export const PANEL_TEXT = {
   channelsTitle: "频道榜 · Channel leaders",
   compareTitle: "跨领域对比 · Niche comparison",
   exportLabel: "导出 CSV",
+  reportLabel: "导出周报",
   exportDone: "已导出",
   exportFailed: "导出失败",
 } as const;

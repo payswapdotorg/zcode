@@ -199,35 +199,63 @@ async function appendVideos(row: HTMLElement, name: string): Promise<void> {
     }
     holder.append(table);
     await appendChannels(holder, name);
-    // CSV export of exactly what is collected; the click must not bubble
-    // into the row toggle that would collapse the detail view.
-    const exportBtn = document.createElement("button");
-    exportBtn.className = "export";
-    exportBtn.type = "button";
-    exportBtn.textContent = PANEL_TEXT.exportLabel;
-    exportBtn.onclick = (event) => {
-      event.stopPropagation();
-      void (async () => {
-        exportBtn.disabled = true;
-        try {
-          const result = (await app.callServerTool({
-            name: "niche_export",
-            arguments: { name, format: "csv" },
-          })) as NicheExportResult;
-          const structured = result.isError ? undefined : result.structuredContent;
-          exportBtn.textContent = structured?.exported
-            ? `${PANEL_TEXT.exportDone}: ${structured.path ?? ""}`
-            : PANEL_TEXT.exportFailed;
-        } catch {
-          exportBtn.textContent = PANEL_TEXT.exportFailed;
-        }
-      })();
-    };
-    holder.append(exportBtn);
+    // Exports of exactly what is collected; clicks must not bubble into the
+    // row toggle that would collapse the detail view.
+    holder.append(
+      exportButton({
+        tool: "niche_export",
+        args: { name, format: "csv" },
+        label: PANEL_TEXT.exportLabel,
+        stopPropagation: true,
+      }),
+      exportButton({
+        tool: "niche_export",
+        args: { name, format: "report" },
+        label: PANEL_TEXT.reportLabel,
+        stopPropagation: true,
+      }),
+    );
   } catch {
     holder.replaceChildren();
     text(holder, "error", PANEL_TEXT.videosFailed);
   }
+}
+
+/**
+ * Export button shared by the niche detail (CSV + report) and the comparison
+ * block: one click, one tool call, the label then carries the written path or
+ * the failure. `stopPropagation` keeps a click inside the clickable detail
+ * row from collapsing it.
+ */
+function exportButton(opts: {
+  tool: string;
+  args: Record<string, unknown>;
+  label: string;
+  stopPropagation?: boolean;
+}): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "export";
+  btn.type = "button";
+  btn.textContent = opts.label;
+  btn.onclick = (event) => {
+    if (opts.stopPropagation) event.stopPropagation();
+    void (async () => {
+      btn.disabled = true;
+      try {
+        const result = (await app.callServerTool({
+          name: opts.tool,
+          arguments: opts.args,
+        })) as NicheExportResult;
+        const structured = result.isError ? undefined : result.structuredContent;
+        btn.textContent = structured?.exported
+          ? `${PANEL_TEXT.exportDone}: ${structured.path ?? ""}`
+          : PANEL_TEXT.exportFailed;
+      } catch {
+        btn.textContent = PANEL_TEXT.exportFailed;
+      }
+    })();
+  };
+  return btn;
 }
 
 /** Channel leaderboard under the video ranking; skipped silently when empty. */
@@ -311,28 +339,13 @@ async function appendComparison(card: HTMLElement): Promise<void> {
     }
     holder.append(table);
     // CSV export of the comparison table, same surface as the per-niche export.
-    const exportBtn = document.createElement("button");
-    exportBtn.className = "export";
-    exportBtn.type = "button";
-    exportBtn.textContent = PANEL_TEXT.exportLabel;
-    exportBtn.onclick = () => {
-      void (async () => {
-        exportBtn.disabled = true;
-        try {
-          const result = (await app.callServerTool({
-            name: "niche_export_compare",
-            arguments: { format: "csv" },
-          })) as NicheExportResult;
-          const structured = result.isError ? undefined : result.structuredContent;
-          exportBtn.textContent = structured?.exported
-            ? `${PANEL_TEXT.exportDone}: ${structured.path ?? ""}`
-            : PANEL_TEXT.exportFailed;
-        } catch {
-          exportBtn.textContent = PANEL_TEXT.exportFailed;
-        }
-      })();
-    };
-    holder.append(exportBtn);
+    holder.append(
+      exportButton({
+        tool: "niche_export_compare",
+        args: { format: "csv" },
+        label: PANEL_TEXT.exportLabel,
+      }),
+    );
   } catch {
     section.remove();
   }

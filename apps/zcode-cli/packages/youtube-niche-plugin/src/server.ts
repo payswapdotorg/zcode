@@ -296,10 +296,10 @@ export function createNicheServer({
     "niche_export",
     {
       description:
-        "Export the videos collected for a niche to a CSV or Markdown file under the plugin's exports directory — ranked by the niche_rank score with views/day and engagement included. Offline: exports whatever is already collected.",
+        "Export a niche to a file under the plugin's exports directory: format csv/markdown = the ranked videos (niche_rank score, views/day, engagement); format report = a full Markdown report with momentum summary, ranked videos with trends, channel leaderboard and the cross-niche position. Offline: exports whatever is already collected.",
       inputSchema: {
         name: z.string().trim().min(1).max(64),
-        format: z.enum(["csv", "markdown"]).default("csv"),
+        format: z.enum(["csv", "markdown", "report"]).default("csv"),
         limit: z.number().int().min(1).max(200).optional(),
       },
       annotations: { readOnlyHint: false },
@@ -324,7 +324,7 @@ export function createNicheServer({
       if (!result.ok)
         return textResult(result.reason, { niche: name, exported: false, reason: result.reason });
       return textResult(
-        `Exported ${result.rows} videos for "${name}" to ${result.path} (${result.bytes} bytes, ${format === "csv" ? "CSV" : "Markdown"}).`,
+        `Exported ${result.rows} videos for "${name}" to ${result.path} (${result.bytes} bytes, ${format === "csv" ? "CSV" : format === "report" ? "Markdown report" : "Markdown"}).`,
         {
           niche: name,
           exported: true,

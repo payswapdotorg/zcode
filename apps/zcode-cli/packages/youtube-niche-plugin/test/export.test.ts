@@ -272,3 +272,116 @@ describe("comparison export", () => {
     expect(content).not.toContain("third niche");
   });
 });
+
+describe("report export", () => {
+  const dirs: string[] = [];
+  const databases: NicheDatabase[] = [];
+  afterEach(() => {
+    for (const db of databases.splice(0)) db.close();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const openDb = (): { db: NicheDatabase; dataDir: string } => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-report-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    databases.push(db);
+    return { db, dataDir };
+  };
+
+  /** "hot espresso" accelerating (two snapshots), "cold brew, iced" unclassified (one). */
+  const seed = (db: NicheDatabase): void => {
+    const hot = db.addNiche("hot espresso");
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 1000,
+        collected_at: "2026-11-15T00:00:00Z",
+      }),
+    );
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 6000,
+        like_count: 300,
+        comment_count: 100,
+        collected_at: "2026-11-18T00:00:00Z",
+      }),
+    );
+    const cold = db.addNiche("cold brew, iced");
+    db.addVideo(
+      cold.id,
+      video({
+        video_id: "c1",
+        title: "Cold one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 3000,
+        like_count: 90,
+        comment_count: 30,
+        collected_at: "2026-11-18T00:00:00Z",
+      }),
+    );
+  };
+
+  it("composes a full report: momentum, ranked videos with trends, channels, position", () => {
+    const { db, dataDir } = openDb();
+    seed(db);
+    const hot = db.listNiches().find((niche) => niche.name === "hot espresso")!;
+    const result = exportNiche({ db, niche: hot, format: "report", dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.path).toMatch(/exports\/niche-hot-espresso-report-20261118-1100\.md$/);
+    const content = readFileSync(result.path, "utf8");
+    expect(content).toContain("# hot espresso — niche report");
+    expect(content).toContain("## Momentum");
+    expect(content).toContain("1 accelerating · 0 steady · 0 cooling · 0 insufficient");
+    expect(content).toContain("## Ranked videos");
+    // Trend cell carries the class and the 2.9× ratio; single-video batch scores 1.0.
+    expect(content).toContain("| 1 | Hot one | c1 | 2026-11-08 | 6000 | 574 | accelerating 2.9× | 1.0000 |");
+    expect(content).toContain("## Top channels");
+    expect(content).toContain("| 1 | c1 | 1 | 6000 | 574 | 6.7% | 1.0000 |");
+    expect(content).toContain("## Cross-niche position");
+    expect(content).toContain("**#1 of 2** tracked niches by composite score");
+    expect(content).toContain('leader "hot espresso" at 1.00');
+    expect(content).toContain("Heat: 100% accelerating share.");
+  });
+
+  it("keeps unclassified trends and a losing position honest", () => {
+    const { db, dataDir } = openDb();
+    seed(db);
+    const cold = db.listNiches().find((niche) => niche.name === "cold brew, iced")!;
+    const result = exportNiche({ db, niche: cold, format: "report", dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.path).toMatch(/exports\/niche-cold-brew-iced-report-20261118-1100\.md$/);
+    const content = readFileSync(result.path, "utf8");
+    // Single snapshot → insufficient without a made-up ratio.
+    expect(content).toContain("| insufficient | 1.0000 |");
+    expect(content).toContain("**#2 of 2** tracked niches by composite score (0.32;");
+    expect(content).toContain("Heat: no classified videos yet.");
+  });
+
+  it("reports an honest single-niche position line", () => {
+    const { db, dataDir } = openDb();
+    const lonely = db.addNiche("lonely");
+    db.addVideo(lonely.id, video({ title: "Only one" }));
+    const result = exportNiche({
+      db,
+      niche: { ...lonely, channel_count: 0, video_count: 1 },
+      format: "report",
+      dataDir,
+      now: NOW,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const content = readFileSync(result.path, "utf8");
+    expect(content).toContain("Only this niche is tracked");
+    expect(content).not.toContain("**#1 of");
+  });
+});

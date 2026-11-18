@@ -664,4 +664,50 @@ describe("niche_export_compare tool", () => {
     const result = await client.callTool({ name: "niche_export_compare", arguments: {} });
     expect(textOf(result)).toContain("at least 2 tracked niches (currently 1)");
   });
+
+  it("exports a full Markdown report with the cross-niche position", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-report-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "espresso", format: "report" },
+    });
+    expect(textOf(result)).toContain("Exported 1 videos");
+    expect(textOf(result)).toContain("Markdown report");
+    const structured = (
+      result as { structuredContent?: { path?: string; format?: string } }
+    ).structuredContent;
+    expect(structured?.format).toBe("report");
+    expect(structured?.path).toMatch(/exports\/niche-espresso-report-\d{8}-\d{4}\.md$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content).toContain("# espresso — niche report");
+    expect(content).toContain("## Momentum");
+    expect(content).toContain("## Top channels");
+    expect(content).toContain("**#1 of 2** tracked niches by composite score");
+  });
 });
