@@ -67,6 +67,12 @@ export async function main(): Promise<void> {
     ...(tokenKey ? { tokenKey } : {}),
     dataDir,
     ...(clientId ? { clientId } : {}),
+    // Opt-in hands-off collection: it spends YouTube quota on a timer, so the
+    // user enables it explicitly. Scheduled exports are free local writes and
+    // stay on by default.
+    ...(process.env.YOUTUBE_NICHE_PLUGIN_SCHEDULED_COLLECT === "1"
+      ? { collectionScheduler: {} }
+      : {}),
   });
   let stopping = false;
   async function close() {

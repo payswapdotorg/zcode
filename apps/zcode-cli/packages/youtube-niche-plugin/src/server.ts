@@ -34,7 +34,7 @@ import {
   YouTubeNotConfiguredError,
 } from "#niche/youtube/client.ts";
 import type { QuotaKv } from "#niche/youtube/quota.ts";
-import { collectForNiche } from "#niche/youtube/collect.ts";
+import { collectForNiche, runScheduledCollections } from "#niche/youtube/collect.ts";
 import { fetchTokenPost, OAuthError, type TokenPost } from "#niche/youtube/oauth.ts";
 import { OAuthFlowError, startLoopbackFlow, type StartedFlow } from "#niche/youtube/oauth-flow.ts";
 import { OAuthSession } from "#niche/youtube/oauth-session.ts";
@@ -52,11 +52,11 @@ const surfaceMeta = {
   ui: { resourceUri: PANEL_URI, surface: SURFACE_ID, visibility: ["model", "app"] as const },
 };
 
-/** Timer knobs for scheduled report exports; tests inject tiny values. */
-export interface ExportSchedulerOptions {
-  /** Delay before the first marker check after startup (default 60s). */
+/** Timer knobs for scheduled export/collection passes; tests inject tiny values. */
+export interface SchedulerOptions {
+  /** Delay before the first check after startup (exports default 60s, collection 5min). */
   startupDelayMs?: number;
-  /** How often the marker is re-checked (default 1h). */
+  /** How often the marker/ledger is re-checked (default 1h). */
   checkIntervalMs?: number;
 }
 
@@ -69,6 +69,7 @@ export function createNicheServer({
   clientId,
   post,
   exportScheduler,
+  collectionScheduler,
 }: {
   db: NicheDatabase;
   assetRoot: string;
@@ -80,7 +81,11 @@ export function createNicheServer({
   clientId?: string;
   /** Injected token-exchange POST; default posts with fetch. */
   post?: TokenPost;
-  exportScheduler?: ExportSchedulerOptions;
+  /** Scheduled report exports (default on when dataDir is wired). */
+  exportScheduler?: SchedulerOptions;
+  /** Opt-in scheduled collection — costs YouTube quota, so main.ts only
+   * passes it when the user enables the env switch. */
+  collectionScheduler?: SchedulerOptions;
 }): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: PLUGIN_VERSION });
   // A successful youtube_connect_finish swaps in an OAuth-backed client.
@@ -133,6 +138,24 @@ export function createNicheServer({
           runScheduledExports({ db, dataDir, now });
       } catch (error) {
         console.error(`youtube-niche: scheduled export failed: ${String(error)}`);
+      }
+    };
+    setTimeout(tick, startupDelayMs).unref();
+    setInterval(tick, checkIntervalMs).unref();
+  }
+
+  // Opt-in scheduled collection (main.ts enables it via env when the user
+  // wants a hands-off data flow): the per-niche 6h guard makes ticks
+  // idempotent and the quota wall stops a pass instead of hammering it. The
+  // tick reads activeClient at call time so an OAuth reconnect is honored.
+  if (collectionScheduler) {
+    const { startupDelayMs = 300_000, checkIntervalMs = 3_600_000 } = collectionScheduler;
+    const tick = async () => {
+      try {
+        if (!activeClient) return; // without credentials there is nothing to collect
+        await runScheduledCollections(activeClient, db);
+      } catch (error) {
+        console.error(`youtube-niche: scheduled collection failed: ${String(error)}`);
       }
     };
     setTimeout(tick, startupDelayMs).unref();

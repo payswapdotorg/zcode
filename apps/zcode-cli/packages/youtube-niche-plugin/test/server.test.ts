@@ -1,27 +1,14 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PANEL_URI } from "#niche/contract.ts";
-import { openNicheDatabase } from "#niche/db.ts";
-import { readScheduleMarker } from "#niche/export.ts";
-import { createNicheServer, type ExportSchedulerOptions } from "#niche/server.ts";
 import { YouTubeClient, type FetchLike } from "#niche/youtube/client.ts";
 import { quotaDayKey } from "#niche/youtube/quota.ts";
 import type { TokenPost } from "#niche/youtube/oauth.ts";
 import { loadTokens } from "#niche/youtube/token-store.ts";
-
-interface ConnectDeps {
-  youtube?: YouTubeClient;
-  tokenKey?: Buffer;
-  dataDir?: string;
-  clientId?: string;
-  post?: TokenPost;
-  exportScheduler?: ExportSchedulerOptions;
-}
+import { makeConnect } from "./support/connect.ts";
 
 const closers: (() => Promise<void>)[] = [];
 const dirs: string[] = [];
@@ -29,6 +16,8 @@ afterEach(async () => {
   for (const close of closers.splice(0)) await close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+const connect = makeConnect(closers, dirs);
 
 const fixtureFetch: FetchLike = (() => {
   const responses = [
@@ -60,27 +49,6 @@ const fixtureFetch: FetchLike = (() => {
     return { status: response.status, json: async () => response.body };
   };
 })();
-
-async function connect(opts: ConnectDeps = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "youtube-niche-"));
-  dirs.push(dir);
-  const db = openNicheDatabase(dir);
-  const server = createNicheServer({
-    db,
-    assetRoot: resolve(import.meta.dirname, "../ui"),
-    ...(opts.youtube ? { youtube: opts.youtube } : {}),
-    ...(opts.tokenKey ? { tokenKey: opts.tokenKey } : {}),
-    ...(opts.dataDir ? { dataDir: opts.dataDir } : {}),
-    ...(opts.clientId ? { clientId: opts.clientId } : {}),
-    ...(opts.post ? { post: opts.post } : {}),
-    ...(opts.exportScheduler ? { exportScheduler: opts.exportScheduler } : {}),
-  });
-  const client = new Client({ name: "test", version: "1" });
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
-  closers.push(() => client.close());
-  return { client, db };
-}
 
 const textOf = (result: unknown): string => {
   const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
@@ -712,40 +680,5 @@ describe("niche_export_compare tool", () => {
     expect(content).toContain("## Momentum");
     expect(content).toContain("## Top channels");
     expect(content).toContain("**#1 of 2** tracked niches by composite score");
-  });
-});
-
-describe("scheduled exports wiring", () => {
-  it("writes reports automatically shortly after startup", async () => {
-    const exportDir = mkdtempSync(join(tmpdir(), "niche-schedule-tool-"));
-    dirs.push(exportDir);
-    const { db } = await connect({
-      dataDir: exportDir,
-      // The first tick may fire before the seed below lands; the 100ms
-      // re-check guarantees a tick sees the data regardless of connect timing.
-      exportScheduler: { startupDelayMs: 10, checkIntervalMs: 100 },
-    });
-    // Seed after connect: the scheduler must pick up what exists at tick time.
-    const espresso = db.addNiche("espresso");
-    db.addVideo(espresso.id, {
-      video_id: "v1",
-      title: "Heating up",
-      channel_id: "c1",
-      published_at: "2026-11-01T00:00:00Z",
-      view_count: 10000,
-      like_count: 10,
-      comment_count: 1,
-      duration_seconds: 60,
-      collected_at: "2026-11-17T00:00:00Z",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    expect(readScheduleMarker(exportDir).lastRun).toBeTruthy();
-    const files = readdirSync(join(exportDir, "exports"));
-    expect(files.some((name) => /^niche-espresso-report-\d{8}-\d{4}\.md$/.test(name))).toBe(true);
-    const report = readFileSync(
-      join(exportDir, "exports", files.find((name) => name.endsWith(".md"))!),
-      "utf8",
-    );
-    expect(report).toContain("# espresso — niche report");
   });
 });

@@ -1,5 +1,6 @@
 import type { VideoRecord } from "#niche/contract.ts";
 import type { YouTubeClient, VideoStats } from "#niche/youtube/client.ts";
+import { QuotaExceededError } from "#niche/youtube/quota.ts";
 
 /** Skip window for the recent-collection guard: 100 units per search is the
  * niche store's only expensive call, so re-searching within hours is waste. */
@@ -133,4 +134,76 @@ export async function collectForNiche(
     ...(publishedAfter ? { publishedAfter } : {}),
     quota: client.quotaSnapshot(now),
   };
+}
+
+// ── Scheduled collections ───────────────────────────────────────────────────
+
+/** The store the collection pipeline touches (structural so tests can stub it). */
+interface CollectionDb {
+  listNiches(): { id: number; name: string }[];
+  addVideo(nicheId: number, video: VideoRecord): boolean;
+  addChannel(nicheId: number, channelId: string, title: string): boolean;
+  listVideos(nicheId: number): VideoRecord[];
+  getMeta(key: string): string | undefined;
+  setMeta(key: string, value: string): void;
+}
+
+export interface ScheduledCollectionSummary {
+  /** Niches that ran a search this pass. */
+  collected: { niche: string; found: number; collected: number; refreshed: number }[];
+  /** Niches skipped by the recent-collection guard (quota preserved). */
+  skipped: string[];
+  /** Per-niche failures that did not stop the pass. */
+  failures: { niche: string; error: string }[];
+  /** Niches left unattempted after the quota wall was hit. */
+  remaining: string[];
+  /** True when the pass stopped early because the daily quota was exhausted. */
+  stoppedByQuota: boolean;
+}
+
+/**
+ * One scheduled collection pass over every tracked niche. The per-niche 6h
+ * guard makes ticks idempotent; the quota ledger refuses over-budget runs
+ * before spending — hitting that wall stops the pass (listing the niches that
+ * were left) instead of hammering it, and a single niche's API failure does
+ * not block the others.
+ */
+export async function runScheduledCollections(
+  client: YouTubeClient,
+  db: CollectionDb,
+  now = new Date(),
+): Promise<ScheduledCollectionSummary> {
+  const summary: ScheduledCollectionSummary = {
+    collected: [],
+    skipped: [],
+    failures: [],
+    remaining: [],
+    stoppedByQuota: false,
+  };
+  const niches = db.listNiches();
+  for (let index = 0; index < niches.length; index++) {
+    const niche = niches[index]!;
+    try {
+      const result = await collectForNiche(client, db, niche.id, niche.name, {}, now);
+      if (result.searched)
+        summary.collected.push({
+          niche: niche.name,
+          found: result.found,
+          collected: result.collected,
+          refreshed: result.refreshed,
+        });
+      else summary.skipped.push(niche.name);
+    } catch (error) {
+      if (error instanceof QuotaExceededError) {
+        summary.stoppedByQuota = true;
+        summary.remaining = niches.slice(index + 1).map((entry) => entry.name);
+        break;
+      }
+      summary.failures.push({
+        niche: niche.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return summary;
 }

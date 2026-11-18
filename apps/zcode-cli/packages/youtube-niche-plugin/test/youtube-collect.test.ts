@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openNicheDatabase } from "#niche/db.ts";
 import { computeMomentum } from "#niche/ranking.ts";
 import { YouTubeClient, type FetchLike } from "#niche/youtube/client.ts";
-import { collectForNiche } from "#niche/youtube/collect.ts";
+import { collectForNiche, runScheduledCollections } from "#niche/youtube/collect.ts";
+import { quotaDayKey } from "#niche/youtube/quota.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -256,6 +257,116 @@ describe("collectForNiche", () => {
     expect(ids[49]).toBe("s11");
     // one extra videos.list unit for the refresh pass: 100 + 1 + 1 + 1
     expect(result.quota).toEqual({ used: 103, limit: 10000, remaining: 9897 });
+    db.close();
+  });
+});
+
+describe("scheduled collections", () => {
+  const NOW = new Date("2026-11-18T12:00:00Z");
+
+  const openDb = () => {
+    const dir = mkdtempSync(join(tmpdir(), "niche-sched-collect-"));
+    dirs.push(dir);
+    return openNicheDatabase(dir);
+  };
+
+  it("collects every niche whose window is open", async () => {
+    const db = openDb();
+    const espresso = db.addNiche("espresso");
+    const pourOver = db.addNiche("pour over");
+    const seen: Recorded[] = [];
+    const summary = await runScheduledCollections(makeClient(seen), db, NOW);
+    expect(summary.stoppedByQuota).toBe(false);
+    expect(summary.skipped).toEqual([]);
+    expect(summary.failures).toEqual([]);
+    // listNiches is newest-first: "pour over" is searched first.
+    expect(summary.collected.map((entry) => entry.niche)).toEqual(["pour over", "espresso"]);
+    // Fixture semantics: the first search finds v1+v2, later searches find v3.
+    expect(summary.collected[0]).toMatchObject({ niche: "pour over", found: 2, collected: 2 });
+    expect(db.listVideos(pourOver.id)).toHaveLength(2);
+    expect(db.listVideos(espresso.id)).toHaveLength(1);
+    db.close();
+  });
+
+  it("skips niches inside the 6h guard window", async () => {
+    const db = openDb();
+    const espresso = db.addNiche("espresso");
+    const pourOver = db.addNiche("pour over");
+    db.setMeta(`last_collect:${espresso.id}`, new Date(NOW.getTime() - 60 * 60 * 1000).toISOString());
+    const seen: Recorded[] = [];
+    const summary = await runScheduledCollections(makeClient(seen), db, NOW);
+    expect(summary.skipped).toEqual(["espresso"]);
+    expect(summary.collected.map((entry) => entry.niche)).toEqual(["pour over"]);
+    expect(db.listVideos(espresso.id)).toHaveLength(0);
+    db.close();
+  });
+
+  it("stops at the quota wall before spending and lists what was left", async () => {
+    const db = openDb();
+    db.addNiche("espresso");
+    db.addNiche("pour over");
+    const seen: Recorded[] = [];
+    const kv = new Map<string, string>([
+      ["youtube_quota_day", quotaDayKey(NOW)],
+      ["youtube_quota_used", "9950"],
+    ]);
+    const client = new YouTubeClient({
+      kv: { get: (key) => kv.get(key), set: (key, value) => void kv.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: makeFixtureFetch(seen),
+    });
+    const summary = await runScheduledCollections(client, db, NOW);
+    expect(summary.stoppedByQuota).toBe(true);
+    expect(summary.collected).toEqual([]);
+    // listNiches is newest-first, so "pour over" hits the wall and the older
+    // "espresso" is what gets left unattempted.
+    expect(summary.remaining).toEqual(["espresso"]);
+    // The ledger refuses before spending: not a single request went out.
+    expect(seen).toHaveLength(0);
+    db.close();
+  });
+
+  it("isolates per-niche failures and keeps collecting the rest", async () => {
+    const db = openDb();
+    const broken = db.addNiche("broken niche");
+    const fine = db.addNiche("fine niche");
+    const failingFetch: FetchLike = async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/search")) {
+        if ((parsed.searchParams.get("q") ?? "").includes("broken"))
+          return { status: 403, json: async () => ({ error: { message: "Forbidden by fixture" } }) };
+        return { status: 200, json: async () => ({ items: [{ id: { videoId: "v1" }, snippet: { channelId: "c1" } }] }) };
+      }
+      if (parsed.pathname.endsWith("/videos"))
+        return {
+          status: 200,
+          json: async () => ({
+            items: [
+              {
+                id: "v1",
+                snippet: { title: "Fine video", channelId: "c1", publishedAt: "2026-11-16T00:00:00Z" },
+                statistics: { viewCount: "900", likeCount: "9", commentCount: "1" },
+                contentDetails: { duration: "PT3M" },
+              },
+            ],
+          }),
+        };
+      return { status: 200, json: async () => ({ items: [{ id: "c1", snippet: { title: "Channel One" } }] }) };
+    };
+    const kv = new Map<string, string>();
+    const client = new YouTubeClient({
+      kv: { get: (key) => kv.get(key), set: (key, value) => void kv.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: failingFetch,
+    });
+    const summary = await runScheduledCollections(client, db, NOW);
+    expect(summary.stoppedByQuota).toBe(false);
+    expect(summary.failures).toHaveLength(1);
+    expect(summary.failures[0]!.niche).toBe("broken niche");
+    expect(summary.failures[0]!.error).toBeTruthy();
+    expect(summary.collected.map((entry) => entry.niche)).toEqual(["fine niche"]);
+    expect(db.listVideos(broken.id)).toHaveLength(0);
+    expect(db.listVideos(fine.id)).toHaveLength(1);
     db.close();
   });
 });
