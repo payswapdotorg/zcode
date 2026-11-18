@@ -73,8 +73,12 @@ jobs:
 
       # Native cmake/MSVC path on windows-latest: no mingw cross-compile needed
       # (the blocker this job removes for the Linux TL container, P13/P21).
+      # windows-latest = windows-2025-vs2026 (VS 18 2026); the scripts default
+      # to the VS 17 2022 generator of local dev boxes, so override it here.
       - name: Bundle Windows x64 installer (NSIS)
         run: pnpm bundle:desktop -- --os win --arch x64
+        env:
+          ZCODE_CMAKE_GENERATOR: Visual Studio 18 2026
 
       - name: SHA256 checksums
         shell: pwsh

@@ -40,7 +40,9 @@ export function resolveNativeWindowsBuildConfig({
   return {
     arch: normalizedArch,
     cmake: env.CMAKE?.trim() || "cmake",
-    generator: "Visual Studio 17 2022",
+    // Overridable for CI images with newer Visual Studio (see
+    // build-windows-runtime-host.mjs; windows-2025-vs2026 ships VS 18 2026).
+    generator: env.ZCODE_CMAKE_GENERATOR?.trim() || "Visual Studio 17 2022",
     generatorArchitecture: normalizedArch === "arm64" ? "ARM64" : "x64",
     hostArch: normalizedHostArch,
     platform: normalizedPlatform,

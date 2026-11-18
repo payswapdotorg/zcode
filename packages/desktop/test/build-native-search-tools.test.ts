@@ -791,6 +791,15 @@ describe("native search build", () => {
       generatorArchitecture: "ARM64",
       platform: "win32",
     });
+    expect(
+      resolveNativeWindowsBuildConfig({
+        platform: "win32",
+        arch: "x64",
+        hostPlatform: "win32",
+        hostArch: "x64",
+        env: { ZCODE_CMAKE_GENERATOR: "Visual Studio 18 2026" },
+      }).generator,
+    ).toBe("Visual Studio 18 2026");
     expect(x64Config).not.toHaveProperty("cargo");
     expect(arm64Config).not.toHaveProperty("cargo");
     expect(windowsNativeSearchCmake).toMatch(
