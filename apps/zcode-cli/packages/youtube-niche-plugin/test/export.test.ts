@@ -1,10 +1,19 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NicheRecord, VideoRecord } from "#niche/contract.ts";
 import { openNicheDatabase, type NicheDatabase } from "#niche/db.ts";
-import { exportComparison, exportNiche, slugifyNiche, toCsv, toMarkdown } from "#niche/export.ts";
+import {
+  exportComparison,
+  exportNiche,
+  readScheduleMarker,
+  runScheduledExports,
+  shouldRunScheduledExports,
+  slugifyNiche,
+  toCsv,
+  toMarkdown,
+} from "#niche/export.ts";
 import { rankVideos, type ScoredVideo } from "#niche/ranking.ts";
 
 const NOW = new Date("2026-11-18T11:00:00Z");
@@ -383,5 +392,95 @@ describe("report export", () => {
     const content = readFileSync(result.path, "utf8");
     expect(content).toContain("Only this niche is tracked");
     expect(content).not.toContain("**#1 of");
+  });
+});
+
+describe("scheduled exports", () => {
+  const dirs: string[] = [];
+  const databases: NicheDatabase[] = [];
+  afterEach(() => {
+    for (const db of databases.splice(0)) db.close();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const openDb = (): { db: NicheDatabase; dataDir: string } => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-schedule-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    databases.push(db);
+    return { db, dataDir };
+  };
+
+  it("reads a missing, corrupt or shape-invalid marker as never-run", () => {
+    const { dataDir } = openDb();
+    expect(readScheduleMarker(dataDir)).toEqual({ lastRun: null });
+    writeFileSync(join(dataDir, "schedule.json"), "{not json", "utf8");
+    expect(readScheduleMarker(dataDir)).toEqual({ lastRun: null });
+    writeFileSync(join(dataDir, "schedule.json"), JSON.stringify({ lastRun: 42 }), "utf8");
+    expect(readScheduleMarker(dataDir)).toEqual({ lastRun: null });
+  });
+
+  it("runs only once the interval elapsed", () => {
+    const now = new Date("2026-11-18T12:00:00Z");
+    expect(shouldRunScheduledExports({ lastRun: null }, now)).toBe(true);
+    // 1h ago with the default 24h interval → not yet.
+    expect(shouldRunScheduledExports({ lastRun: "2026-11-18T11:00:00Z" }, now)).toBe(false);
+    // 24h1m ago → due.
+    expect(shouldRunScheduledExports({ lastRun: "2026-11-17T11:59:00Z" }, now)).toBe(true);
+    // A custom 1h interval flips the recent marker to due.
+    expect(shouldRunScheduledExports({ lastRun: "2026-11-18T11:00:00Z" }, now, 1)).toBe(true);
+    // A garbage date cannot prove a recent run → run again.
+    expect(shouldRunScheduledExports({ lastRun: "garbage" }, now)).toBe(true);
+  });
+
+  it("writes a report per niche with videos and stamps the marker", () => {
+    const { db, dataDir } = openDb();
+    const hot = db.addNiche("hot espresso");
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 1000,
+        collected_at: "2026-11-15T00:00:00Z",
+      }),
+    );
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 6000,
+        like_count: 300,
+        comment_count: 100,
+        collected_at: "2026-11-18T00:00:00Z",
+      }),
+    );
+    db.addNiche("empty niche");
+    const result = runScheduledExports({ db, dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.written.map((row) => row.niche)).toEqual(["hot espresso"]);
+    expect(result.skipped).toEqual(["empty niche"]);
+    const content = readFileSync(result.written[0]!.path, "utf8");
+    expect(content).toContain("# hot espresso — niche report");
+    expect(readScheduleMarker(dataDir)).toEqual({ lastRun: NOW.toISOString() });
+    // The stamped marker is fresh → the next check (24h default) skips.
+    expect(shouldRunScheduledExports(readScheduleMarker(dataDir), NOW)).toBe(false);
+  });
+
+  it("does not stamp the marker when nothing was written", () => {
+    const { db, dataDir } = openDb();
+    db.addNiche("empty niche");
+    const result = runScheduledExports({ db, dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.written).toEqual([]);
+    expect(result.skipped).toEqual(["empty niche"]);
+    // No report → no marker: the next check still considers a run due.
+    expect(readScheduleMarker(dataDir)).toEqual({ lastRun: null });
+    expect(shouldRunScheduledExports(readScheduleMarker(dataDir), NOW)).toBe(true);
   });
 });

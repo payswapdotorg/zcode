@@ -10,7 +10,13 @@ import {
   SURFACE_ID,
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
-import { exportComparison, exportNiche } from "#niche/export.ts";
+import {
+  exportComparison,
+  exportNiche,
+  readScheduleMarker,
+  runScheduledExports,
+  shouldRunScheduledExports,
+} from "#niche/export.ts";
 import {
   compareNiches,
   computeMomentum,
@@ -46,6 +52,14 @@ const surfaceMeta = {
   ui: { resourceUri: PANEL_URI, surface: SURFACE_ID, visibility: ["model", "app"] as const },
 };
 
+/** Timer knobs for scheduled report exports; tests inject tiny values. */
+export interface ExportSchedulerOptions {
+  /** Delay before the first marker check after startup (default 60s). */
+  startupDelayMs?: number;
+  /** How often the marker is re-checked (default 1h). */
+  checkIntervalMs?: number;
+}
+
 export function createNicheServer({
   db,
   assetRoot,
@@ -54,6 +68,7 @@ export function createNicheServer({
   dataDir,
   clientId,
   post,
+  exportScheduler,
 }: {
   db: NicheDatabase;
   assetRoot: string;
@@ -65,6 +80,7 @@ export function createNicheServer({
   clientId?: string;
   /** Injected token-exchange POST; default posts with fetch. */
   post?: TokenPost;
+  exportScheduler?: ExportSchedulerOptions;
 }): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: PLUGIN_VERSION });
   // A successful youtube_connect_finish swaps in an OAuth-backed client.
@@ -103,6 +119,20 @@ export function createNicheServer({
       return undefined;
     }
   };
+
+  // Scheduled report exports: check the marker shortly after startup and then
+  // hourly — a daily open of the host app still catches up on a missed run.
+  // Unref'd timers never keep the process alive on their own.
+  if (dataDir) {
+    const { startupDelayMs = 60_000, checkIntervalMs = 3_600_000 } = exportScheduler ?? {};
+    const tick = () => {
+      const now = new Date();
+      if (shouldRunScheduledExports(readScheduleMarker(dataDir), now))
+        runScheduledExports({ db, dataDir, now });
+    };
+    setTimeout(tick, startupDelayMs).unref();
+    setInterval(tick, checkIntervalMs).unref();
+  }
 
   server.registerResource(
     "panel",

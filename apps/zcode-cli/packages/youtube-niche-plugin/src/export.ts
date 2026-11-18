@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { NicheRecord } from "#niche/contract.ts";
 import type { NicheDatabase } from "#niche/db.ts";
@@ -381,4 +381,83 @@ export function exportComparison(opts: {
   );
   writeFileSync(path, content, "utf8");
   return { ok: true, path, rows: comparison.length, bytes: Buffer.byteLength(content, "utf8") };
+}
+
+// ── Scheduled exports ───────────────────────────────────────────────────────
+
+/** How long to wait between scheduled report runs (checked hourly by the server). */
+export const SCHEDULED_EXPORT_INTERVAL_HOURS = 24;
+
+/** Marker file (dataDir root) remembering the last scheduled run. */
+const SCHEDULE_MARKER_FILE = "schedule.json";
+
+export interface ScheduleMarker {
+  lastRun: string | null;
+}
+
+/** Reads the schedule marker; a missing or corrupt file counts as "never ran". */
+export function readScheduleMarker(dataDir: string): ScheduleMarker {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dataDir, SCHEDULE_MARKER_FILE), "utf8")) as {
+      lastRun?: unknown;
+    };
+    return typeof parsed.lastRun === "string" ? { lastRun: parsed.lastRun } : { lastRun: null };
+  } catch {
+    return { lastRun: null };
+  }
+}
+
+/** True when no run happened yet, the interval elapsed, or the marker date is garbage. */
+export function shouldRunScheduledExports(
+  marker: ScheduleMarker,
+  now: Date,
+  intervalHours: number = SCHEDULED_EXPORT_INTERVAL_HOURS,
+): boolean {
+  if (!marker.lastRun) return true;
+  const elapsed = now.getTime() - new Date(marker.lastRun).getTime();
+  return !Number.isFinite(elapsed) || elapsed >= intervalHours * 60 * 60 * 1000;
+}
+
+export type ScheduledExportResult = {
+  ok: true;
+  /** Reports written this run, one per niche with collected videos. */
+  written: { niche: string; path: string }[];
+  /** Tracked niches without collected videos — nothing to report yet. */
+  skipped: string[];
+};
+
+/**
+ * One scheduled export pass: a Markdown report for every niche with collected
+ * videos. The marker only advances when at least one report was written, so a
+ * day without data does not delay the next real report.
+ */
+export function runScheduledExports(opts: {
+  db: NicheDatabase;
+  dataDir: string;
+  now?: Date;
+}): ScheduledExportResult {
+  const now = opts.now ?? new Date();
+  const written: { niche: string; path: string }[] = [];
+  const skipped: string[] = [];
+  for (const niche of opts.db.listNiches()) {
+    if (!opts.db.listVideos(niche.id).length) {
+      skipped.push(niche.name);
+      continue;
+    }
+    const result = exportNiche({
+      db: opts.db,
+      niche,
+      format: "report",
+      dataDir: opts.dataDir,
+      now,
+    });
+    if (result.ok) written.push({ niche: niche.name, path: result.path });
+  }
+  if (written.length)
+    writeFileSync(
+      join(opts.dataDir, SCHEDULE_MARKER_FILE),
+      `${JSON.stringify({ lastRun: now.toISOString() }, null, 2)}\n`,
+      "utf8",
+    );
+  return { ok: true, written, skipped };
 }
