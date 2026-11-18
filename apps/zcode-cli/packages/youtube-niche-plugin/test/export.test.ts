@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { openNicheDatabase, type NicheDatabase } from "#niche/db.ts";
 import {
   exportComparison,
   exportNiche,
+  pruneExports,
   readScheduleMarker,
   runScheduledExports,
   shouldRunScheduledExports,
@@ -482,5 +483,103 @@ describe("scheduled exports", () => {
     // No report → no marker: the next check still considers a run due.
     expect(readScheduleMarker(dataDir)).toEqual({ lastRun: null });
     expect(shouldRunScheduledExports(readScheduleMarker(dataDir), NOW)).toBe(true);
+  });
+});
+
+describe("export retention", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const openExportsDir = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "niche-prune-"));
+    dirs.push(dir);
+    return dir;
+  };
+
+  const touch = (dir: string, name: string): void => {
+    writeFileSync(join(dir, name), "x", "utf8");
+  };
+
+  it("keeps the newest 30 per group and never touches foreign files", () => {
+    const dir = openExportsDir();
+    for (let i = 0; i < 35; i++)
+      touch(dir, `niche-espresso-report-20261117-${String(i).padStart(4, "0")}.md`);
+    touch(dir, "niche-espresso-20261117-0001.csv");
+    touch(dir, "niche-espresso-20261117-0002.csv");
+    touch(dir, "niche-espresso-20261117-0003.md");
+    touch(dir, "niche-compare-20261117-0001.csv");
+    touch(dir, "niche-compare-20261117-0001.md");
+    touch(dir, "notes.txt");
+    touch(dir, "random.md");
+    touch(dir, "niche-bad.txt");
+    const { deleted } = pruneExports({ exportsDir: dir });
+    // Only the 5 oldest espresso reports went; csv/md/compare groups sit far
+    // below the retention and foreign files are not ours to delete.
+    expect(deleted).toEqual([
+      "niche-espresso-report-20261117-0000.md",
+      "niche-espresso-report-20261117-0001.md",
+      "niche-espresso-report-20261117-0002.md",
+      "niche-espresso-report-20261117-0003.md",
+      "niche-espresso-report-20261117-0004.md",
+    ]);
+    const remaining = readdirSync(dir).sort();
+    expect(remaining).toHaveLength(38);
+    expect(remaining).toContain("notes.txt");
+    expect(remaining).toContain("niche-compare-20261117-0001.csv");
+    expect(remaining).toContain("niche-espresso-report-20261117-0034.md");
+  });
+
+  it("prunes each group independently with a custom keep", () => {
+    const dir = openExportsDir();
+    for (const stamp of ["20261117-0100", "20261117-0200", "20261117-0300"]) {
+      touch(dir, `niche-a-${stamp}.csv`);
+      touch(dir, `niche-b-${stamp}.csv`);
+    }
+    const { deleted } = pruneExports({ exportsDir: dir, keep: 2 });
+    expect(deleted).toEqual(["niche-a-20261117-0100.csv", "niche-b-20261117-0100.csv"]);
+    expect(readdirSync(dir).sort()).toEqual([
+      "niche-a-20261117-0200.csv",
+      "niche-a-20261117-0300.csv",
+      "niche-b-20261117-0200.csv",
+      "niche-b-20261117-0300.csv",
+    ]);
+  });
+
+  it("keeps everything at or below the retention and tolerates a missing directory", () => {
+    const dir = openExportsDir();
+    touch(dir, "niche-a-20261117-0100.csv");
+    touch(dir, "niche-a-20261117-0200.csv");
+    touch(dir, "niche-compare-20261117-0100.md");
+    expect(pruneExports({ exportsDir: dir }).deleted).toEqual([]);
+    expect(pruneExports({ exportsDir: join(dir, "nope") }).deleted).toEqual([]);
+    expect(readdirSync(dir)).toHaveLength(3);
+  });
+
+  it("a scheduled pass prunes old reports after writing the new one", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-prune-run-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    const hot = db.addNiche("hot espresso");
+    db.addVideo(
+      hot.id,
+      video({ title: "Hot one", view_count: 6000, collected_at: "2026-11-18T00:00:00Z" }),
+    );
+    const exportsDir = join(dataDir, "exports");
+    mkdirSync(exportsDir, { recursive: true });
+    // 39 stale reports from yesterday plus one an hour before NOW.
+    for (let i = 0; i < 39; i++)
+      touch(exportsDir, `niche-hot-espresso-report-20261117-${String(i).padStart(4, "0")}.md`);
+    touch(exportsDir, "niche-hot-espresso-report-20261118-1059.md");
+    const result = runScheduledExports({ db, dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 41 reports in the group → keep 30: the 11 oldest yesterday files go.
+    expect(result.pruned).toHaveLength(11);
+    const reports = readdirSync(exportsDir).filter((name) => name.includes("-report-"));
+    expect(reports).toHaveLength(30);
+    expect(reports).toContain("niche-hot-espresso-report-20261118-1100.md");
+    db.close();
   });
 });

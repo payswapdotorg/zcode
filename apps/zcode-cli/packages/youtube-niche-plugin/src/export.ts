@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { NicheRecord } from "#niche/contract.ts";
 import type { NicheDatabase } from "#niche/db.ts";
@@ -424,12 +424,80 @@ export type ScheduledExportResult = {
   written: { niche: string; path: string }[];
   /** Tracked niches without collected videos — nothing to report yet. */
   skipped: string[];
+  /** Files removed by retention pruning this pass. */
+  pruned: string[];
 };
+
+/** How many files each export group keeps after pruning. */
+export const SCHEDULED_EXPORT_RETENTION = 30;
+
+/**
+ * Export filename patterns → retention groups. Order matters: report and
+ * compare names also match the plain csv/md patterns with a longer slug, so
+ * they must be tried first.
+ */
+const EXPORT_PATTERNS = [
+  { re: /^niche-(?<slug>.+)-report-(?<stamp>\d{8}-\d{4})\.md$/, kind: "report" },
+  { re: /^niche-compare-(?<stamp>\d{8}-\d{4})\.(?<ext>csv|md)$/, kind: "compare" },
+  { re: /^niche-(?<slug>.+)-(?<stamp>\d{8}-\d{4})\.csv$/, kind: "csv" },
+  { re: /^niche-(?<slug>.+)-(?<stamp>\d{8}-\d{4})\.md$/, kind: "md" },
+] as const;
+
+/**
+ * Prunes the exports directory: keeps the newest `keep` files per group
+ * (report:niche, csv:niche, md:niche, compare:format) and deletes the rest.
+ * Files the plugin did not write are never touched; a missing directory and
+ * individual delete failures are tolerated silently — retention is
+ * housekeeping, not a gate.
+ */
+export function pruneExports(opts: { exportsDir: string; keep?: number }): { deleted: string[] } {
+  const keep = opts.keep ?? SCHEDULED_EXPORT_RETENTION;
+  let names: string[];
+  try {
+    names = readdirSync(opts.exportsDir);
+  } catch {
+    return { deleted: [] };
+  }
+  const groups = new Map<string, string[]>();
+  for (const name of names) {
+    for (const { re, kind } of EXPORT_PATTERNS) {
+      const fields = re.exec(name)?.groups;
+      if (!fields) continue;
+      const slug = fields.slug ?? "";
+      const ext = fields.ext ?? "";
+      const key =
+        kind === "compare"
+          ? `compare:${ext}`
+          : kind === "report"
+            ? `report:${slug}`
+            : `${kind}:${slug}`;
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(name);
+      else groups.set(key, [name]);
+      break;
+    }
+  }
+  const deleted: string[] = [];
+  for (const bucket of groups.values()) {
+    bucket.sort((a, b) => b.localeCompare(a)); // stamps sort lexicographically
+    for (const name of bucket.slice(keep)) {
+      try {
+        unlinkSync(join(opts.exportsDir, name));
+        deleted.push(name);
+      } catch {
+        // A locked file is skipped; the next pass retries.
+      }
+    }
+  }
+  // Ascending order keeps the deleted list deterministic and chronological.
+  return { deleted: deleted.sort((a, b) => a.localeCompare(b)) };
+}
 
 /**
  * One scheduled export pass: a Markdown report for every niche with collected
- * videos. The marker only advances when at least one report was written, so a
- * day without data does not delay the next real report.
+ * videos, then a retention prune so the exports directory stays bounded. The
+ * marker only advances when at least one report was written, so a day without
+ * data does not delay the next real report.
  */
 export function runScheduledExports(opts: {
   db: NicheDatabase;
@@ -459,5 +527,6 @@ export function runScheduledExports(opts: {
       `${JSON.stringify({ lastRun: now.toISOString() }, null, 2)}\n`,
       "utf8",
     );
-  return { ok: true, written, skipped };
+  const { deleted: pruned } = pruneExports({ exportsDir: join(opts.dataDir, "exports") });
+  return { ok: true, written, skipped, pruned };
 }

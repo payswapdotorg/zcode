@@ -122,13 +122,18 @@ export function createNicheServer({
 
   // Scheduled report exports: check the marker shortly after startup and then
   // hourly — a daily open of the host app still catches up on a missed run.
-  // Unref'd timers never keep the process alive on their own.
+  // Unref'd timers never keep the process alive on their own, and a throwing
+  // pass (disk full, locked file) logs instead of killing the process.
   if (dataDir) {
     const { startupDelayMs = 60_000, checkIntervalMs = 3_600_000 } = exportScheduler ?? {};
     const tick = () => {
-      const now = new Date();
-      if (shouldRunScheduledExports(readScheduleMarker(dataDir), now))
-        runScheduledExports({ db, dataDir, now });
+      try {
+        const now = new Date();
+        if (shouldRunScheduledExports(readScheduleMarker(dataDir), now))
+          runScheduledExports({ db, dataDir, now });
+      } catch (error) {
+        console.error(`youtube-niche: scheduled export failed: ${String(error)}`);
+      }
     };
     setTimeout(tick, startupDelayMs).unref();
     setInterval(tick, checkIntervalMs).unref();
