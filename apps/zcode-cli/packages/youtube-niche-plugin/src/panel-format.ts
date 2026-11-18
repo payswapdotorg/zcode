@@ -44,22 +44,50 @@ export interface RankedRow {
   title: string;
   viewsPerDay: string;
   barWidth: string;
+  /** Trend badge glyph joined from niche_trends ("—" when unknown). */
+  trend: string;
+  /** CSS class for the badge (trend-accelerating / steady / cooling / insufficient). */
+  trendClass: string;
 }
 
-/** Rows for the ranked video table (niche_rank structured output, read structurally). */
+/** Badge glyph per momentum classification; anything unknown stays honest. */
+export function trendBadge(trend: unknown): string {
+  if (trend === "accelerating") return "↗";
+  if (trend === "steady") return "→";
+  if (trend === "cooling") return "↘";
+  return "—";
+}
+
+export function trendClassOf(trend: unknown): string {
+  if (trend === "accelerating" || trend === "steady" || trend === "cooling") {
+    return `trend-${trend}`;
+  }
+  return "trend-insufficient";
+}
+
+/** Rows for the ranked video table (niche_rank output joined with niche_trends). */
 export function rankedVideoRows(
   ranked: ReadonlyArray<{
-    video: { title?: unknown };
+    video: { title?: unknown; video_id?: unknown };
     viewsPerDay?: unknown;
     score?: unknown;
   }>,
+  trends?: ReadonlyArray<{ video_id?: unknown; trend?: unknown }>,
 ): RankedRow[] {
-  return ranked.map((row, index) => ({
-    rank: String(index + 1),
-    title: String(row.video.title ?? ""),
-    viewsPerDay: `${formatPerDay(Number(row.viewsPerDay) || 0)}/day`,
-    barWidth: scoreBarWidth(Number(row.score) || 0),
-  }));
+  const trendByVideo = new Map(
+    (trends ?? []).map((row) => [String(row.video_id ?? ""), row.trend]),
+  );
+  return ranked.map((row, index) => {
+    const trend = trendByVideo.get(String(row.video.video_id ?? ""));
+    return {
+      rank: String(index + 1),
+      title: String(row.video.title ?? ""),
+      viewsPerDay: `${formatPerDay(Number(row.viewsPerDay) || 0)}/day`,
+      barWidth: scoreBarWidth(Number(row.score) || 0),
+      trend: trendBadge(trend),
+      trendClass: trendClassOf(trend),
+    };
+  });
 }
 
 export interface ChannelRow {

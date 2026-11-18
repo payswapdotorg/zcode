@@ -26,6 +26,10 @@ export interface CollectResult {
   /** ISO timestamp the incremental search window started from. */
   publishedAfter?: string;
   lastCollectedAt?: string;
+  /** Stats refreshes of already-tracked videos (≤50 most recent; momentum fuel). */
+  refreshed: number;
+  /** Tracked video count when the run started. */
+  tracked: number;
   quota: { used: number; limit: number; remaining: number };
 }
 
@@ -46,13 +50,18 @@ const toRecord = (video: VideoStats, collectedAt: string): VideoRecord => ({
  * the skip window is refused (quota preserved, `fresh` overrides), and any
  * later pass searches only videos published since the last collection
  * (publishedAfter). Videos and the channels behind them are upserted, so
- * re-collection refreshes stats instead of duplicating rows.
+ * re-collection refreshes stats instead of duplicating rows. Because the
+ * incremental search never returns older videos, each run also refreshes the
+ * stats of up to 50 already-tracked videos with one videos.list call (1
+ * quota unit) — without that pass every tracked video would keep a single
+ * stats snapshot and momentum could never be computed.
  */
 export async function collectForNiche(
   client: YouTubeClient,
   db: {
     addVideo(nicheId: number, video: VideoRecord): boolean;
     addChannel(nicheId: number, channelId: string, title: string): boolean;
+    listVideos(nicheId: number): VideoRecord[];
     getMeta(key: string): string | undefined;
     setMeta(key: string, value: string): void;
   },
@@ -74,11 +83,17 @@ export async function collectForNiche(
       channels: 0,
       searched: false,
       skippedReason: "recent",
+      refreshed: 0,
+      tracked: 0,
       ...(lastCollectedAt ? { lastCollectedAt } : {}),
       quota: client.quotaSnapshot(now),
     };
   }
 
+  // Read before the search upserts anything: the refresh pass targets videos
+  // the incremental window cannot return anymore (listVideos is most recent
+  // first, so the cap keeps the 50 most recently seen).
+  const tracked = db.listVideos(nicheId);
   const publishedAfter = lastCollectedAt && !Number.isNaN(lastMs) ? lastCollectedAt : undefined;
   const search = await client.searchVideoIds(nicheName, {
     maxResults: opts.maxResults ?? 10,
@@ -91,6 +106,20 @@ export async function collectForNiche(
   }
   const collectedAt = now.toISOString();
   for (const video of videos) db.addVideo(nicheId, toRecord(video, collectedAt));
+
+  // Stats refresh pass: one 50-id videos.list (1 unit) for tracked videos
+  // this run's search did not just collect.
+  const justCollected = new Set(videos.map((video) => video.videoId));
+  const refreshIds = tracked
+    .filter((video) => !justCollected.has(video.video_id))
+    .slice(0, 50)
+    .map((video) => video.video_id);
+  let refreshed = 0;
+  if (refreshIds.length) {
+    const stats = await client.fetchVideoStats(refreshIds);
+    refreshed = stats.length;
+    for (const video of stats) db.addVideo(nicheId, toRecord(video, collectedAt));
+  }
   db.setMeta(metaKey, collectedAt);
 
   return {
@@ -99,6 +128,8 @@ export async function collectForNiche(
     collected: videos.length,
     channels: search.channelIds.length,
     searched: true,
+    refreshed,
+    tracked: tracked.length,
     ...(publishedAfter ? { publishedAfter } : {}),
     quota: client.quotaSnapshot(now),
   };

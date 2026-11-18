@@ -241,7 +241,7 @@ export function createNicheServer({
             { ...result, videoCount: niche.video_count },
           );
         return textResult(
-          `Collected ${result.collected} new-or-refreshed videos for "${name}" (search found ${result.found}${result.publishedAfter ? `, incremental since ${result.publishedAfter}` : ""}; ${result.channels} channels; quota: ${result.quota.used}/${result.quota.limit} units used today, ${result.quota.remaining} remaining).`,
+          `Collected ${result.collected} new-or-refreshed videos for "${name}" (search found ${result.found}${result.publishedAfter ? `, incremental since ${result.publishedAfter}` : ""}; ${result.channels} channels${result.refreshed ? `; refreshed stats for ${result.refreshed} tracked videos` : ""}; quota: ${result.quota.used}/${result.quota.limit} units used today, ${result.quota.remaining} remaining).`,
           { ...result },
         );
       } catch (error) {

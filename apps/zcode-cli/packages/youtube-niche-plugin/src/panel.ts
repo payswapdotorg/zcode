@@ -131,6 +131,28 @@ function scoreBar(barWidth: string): HTMLElement {
   return bar;
 }
 
+interface NicheTrendsResult {
+  isError?: boolean;
+  structuredContent?: {
+    trends?: Array<{ video_id?: unknown; trend?: unknown }>;
+  };
+}
+
+/** Trend classification per video (niche_trends); undefined keeps badges at "—". */
+async function fetchTrends(
+  name: string,
+): Promise<ReadonlyArray<{ video_id?: unknown; trend?: unknown }> | undefined> {
+  try {
+    const result = (await app.callServerTool({
+      name: "niche_trends",
+      arguments: { name, limit: 50 },
+    })) as NicheTrendsResult;
+    return result.isError ? undefined : result.structuredContent?.trends;
+  } catch {
+    return undefined;
+  }
+}
+
 async function appendVideos(row: HTMLElement, name: string): Promise<void> {
   const holder = document.createElement("div");
   holder.className = "videos";
@@ -147,21 +169,28 @@ async function appendVideos(row: HTMLElement, name: string): Promise<void> {
       text(holder, "meta", PANEL_TEXT.videosEmpty);
       return;
     }
+    // Trend badges are a bonus: a failed niche_trends call just drops the
+    // column to "—" instead of failing the whole detail view.
+    const rows = rankedVideoRows(ranked, await fetchTrends(name));
     const table = document.createElement("table");
     const head = document.createElement("tr");
-    for (const label of ["#", "标题", "views/day", "潜力分"]) {
+    for (const label of ["#", "标题", "views/day", "趋势", "潜力分"]) {
       const th = document.createElement("th");
       th.textContent = label;
       head.append(th);
     }
     table.append(head);
-    for (const video of rankedVideoRows(ranked)) {
+    for (const video of rows) {
       const tr = document.createElement("tr");
       for (const cell of [video.rank, video.title, video.viewsPerDay]) {
         const td = document.createElement("td");
         td.textContent = cell;
         tr.append(td);
       }
+      const trendCell = document.createElement("td");
+      trendCell.className = video.trendClass;
+      trendCell.textContent = video.trend;
+      tr.append(trendCell);
       const scoreCell = document.createElement("td");
       scoreCell.append(scoreBar(video.barWidth));
       tr.append(scoreCell);

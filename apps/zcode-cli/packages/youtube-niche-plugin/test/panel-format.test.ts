@@ -8,6 +8,8 @@ import {
   nicheItems,
   rankedVideoRows,
   scoreBarWidth,
+  trendBadge,
+  trendClassOf,
 } from "#niche/panel-format.ts";
 
 const niche = (over: Partial<NicheRecord> = {}): NicheRecord => ({
@@ -57,8 +59,60 @@ describe("ranked view rows", () => {
       { video: { title: "Fast" }, viewsPerDay: 1234.5, score: 0.62 },
       { video: { title: "Slow" }, viewsPerDay: 3.25, score: 0.04 },
     ]);
-    expect(rows[0]).toEqual({ rank: "1", title: "Fast", viewsPerDay: "1,235/day", barWidth: "62%" });
-    expect(rows[1]).toEqual({ rank: "2", title: "Slow", viewsPerDay: "3.3/day", barWidth: "4%" });
+    expect(rows[0]).toEqual({
+      rank: "1",
+      title: "Fast",
+      viewsPerDay: "1,235/day",
+      barWidth: "62%",
+      trend: "\u2014",
+      trendClass: "trend-insufficient",
+    });
+    expect(rows[1]).toEqual({
+      rank: "2",
+      title: "Slow",
+      viewsPerDay: "3.3/day",
+      barWidth: "4%",
+      trend: "\u2014",
+      trendClass: "trend-insufficient",
+    });
+  });
+
+  it("joins trend badges from niche_trends by video id", () => {
+    const rows = rankedVideoRows(
+      [
+        { video: { title: "Hot", video_id: "a" }, viewsPerDay: 10, score: 1 },
+        { video: { title: "Cold", video_id: "b" }, viewsPerDay: 5, score: 0.5 },
+        { video: { title: "Flat", video_id: "c" }, viewsPerDay: 1, score: 0.2 },
+      ],
+      [
+        { video_id: "a", trend: "accelerating" },
+        { video_id: "b", trend: "cooling" },
+        { video_id: "c", trend: "steady" },
+      ],
+    );
+    expect(rows.map((row) => [row.trend, row.trendClass])).toEqual([
+      ["\u2197", "trend-accelerating"],
+      ["\u2198", "trend-cooling"],
+      ["\u2192", "trend-steady"],
+    ]);
+    // ids absent from the trends list keep the honest "—"
+    const partial = rankedVideoRows(
+      [{ video: { title: "X", video_id: "zz" }, viewsPerDay: 1, score: 0 }],
+      [{ video_id: "a", trend: "accelerating" }],
+    );
+    expect(partial[0]!.trend).toBe("\u2014");
+  });
+
+  it("maps trend glyphs and classes structurally", () => {
+    expect(trendBadge("accelerating")).toBe("\u2197");
+    expect(trendBadge("steady")).toBe("\u2192");
+    expect(trendBadge("cooling")).toBe("\u2198");
+    expect(trendBadge("insufficient")).toBe("\u2014");
+    expect(trendBadge(undefined)).toBe("\u2014");
+    expect(trendBadge("garbage")).toBe("\u2014");
+    expect(trendClassOf("accelerating")).toBe("trend-accelerating");
+    expect(trendClassOf("insufficient")).toBe("trend-insufficient");
+    expect(trendClassOf(null)).toBe("trend-insufficient");
   });
 
   it("reads channel rows structurally with honest fallbacks", () => {
