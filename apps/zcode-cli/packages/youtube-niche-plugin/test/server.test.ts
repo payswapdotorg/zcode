@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -328,5 +328,87 @@ describe("youtube-niche server", () => {
     // A second connect while tokens are valid reports the existing session.
     const again = await client.callTool({ name: "youtube_connect", arguments: {} });
     expect(textOf(again)).toContain("already connected");
+  });
+});
+
+describe("niche_export tool", () => {
+  it("exports collected videos to CSV in the data directory", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const added = db.addNiche("budget home espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "Espresso, \"ranked\"",
+      channel_id: "c1",
+      published_at: "2026-11-11T00:00:00Z",
+      view_count: 5000,
+      like_count: 200,
+      comment_count: 50,
+      duration_seconds: 480,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "budget home espresso", format: "csv" },
+    });
+    expect(textOf(result)).toContain("Exported 1 videos");
+    const structured = (result as { structuredContent?: { path?: string } }).structuredContent;
+    expect(structured?.path).toMatch(/exports\/niche-budget-home-espresso-\d{8}-\d{4}\.csv$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content).toContain('"Espresso, ""ranked"""');
+    expect(content.split("\n")[0]).toContain("views_per_day");
+  });
+
+  it("exports Markdown with the niche heading", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "V1",
+      channel_id: "c1",
+      published_at: "2026-11-11T00:00:00Z",
+      view_count: 100,
+      like_count: 5,
+      comment_count: 1,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "espresso", format: "markdown" },
+    });
+    const structured = (result as { structuredContent?: { path?: string } }).structuredContent;
+    expect(structured?.path).toMatch(/\.md$/);
+    expect(readFileSync(structured!.path!, "utf8")).toContain("# espresso — collected videos");
+  });
+
+  it("refuses unknown niches and niches without collected videos honestly", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const untracked = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "nope", format: "csv" },
+    });
+    expect(textOf(untracked)).toContain("is not tracked");
+    db.addNiche("empty");
+    const empty = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "empty", format: "csv" },
+    });
+    expect(textOf(empty)).toContain("No videos collected");
+  });
+
+  it("reports missing host wiring instead of writing nowhere", async () => {
+    const { client, db } = await connect();
+    db.addNiche("any");
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "any", format: "csv" },
+    });
+    expect(textOf(result)).toContain("data directory");
   });
 });

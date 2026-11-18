@@ -14,6 +14,9 @@ export const PANEL_TEXT = {
   connectPrompt: "YouTube 待授权：在浏览器打开以下链接完成同意，然后让 agent 调用 youtube_connect_finish。",
   videosEmpty: "该领域还没有采集到视频（等待 R2 后由 niche_collect 填充）。",
   videosFailed: "视频明细加载失败",
+  exportLabel: "导出 CSV",
+  exportDone: "已导出",
+  exportFailed: "导出失败",
 } as const;
 
 export interface QuotaInfo {

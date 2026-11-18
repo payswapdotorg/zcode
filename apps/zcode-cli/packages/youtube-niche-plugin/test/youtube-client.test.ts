@@ -7,6 +7,8 @@ import {
   YouTubeNotConfiguredError,
   type FetchLike,
 } from "#niche/youtube/client.ts";
+import type { TokenPost } from "#niche/youtube/oauth.ts";
+import { OAuthSession } from "#niche/youtube/oauth-session.ts";
 import { readLedger, quotaDayKey, type QuotaKv } from "#niche/youtube/quota.ts";
 
 const kv = (): QuotaKv => {
@@ -206,5 +208,154 @@ describe("YouTubeClient", () => {
       reason: "quotaExceeded",
     });
     expect(new YouTubeApiError(403, "r", "m").message).toBe("m");
+  });
+});
+
+describe("YouTubeClient with an OAuth session", () => {
+  // Fresh at `now` so tests isolate the 401 path; the proactive-refresh test
+  // passes its own almost-expired tokens.
+  const freshTokens = {
+    access_token: "at-1",
+    refresh_token: "rt-1",
+    expires_at: new Date("2026-11-18T12:00:00Z").toISOString(),
+  };
+  const session = (post: TokenPost, tokens: typeof freshTokens = freshTokens) =>
+    new OAuthSession({
+      clientId: "client-1",
+      tokens,
+      post,
+      now: () => new Date("2026-11-18T11:00:00Z"),
+    });
+
+  it("refreshes once on a 401, retries and charges the quota exactly once", async () => {
+    const store = kv();
+    const posts: Record<string, string>[] = [];
+    const seen: Recorded[] = [];
+    const client = new YouTubeClient({
+      kv: store,
+      session: session(async (_endpoint, body) => {
+        posts.push(body);
+        return { status: 200, json: { access_token: "at-2", expires_in: 3600 } };
+      }),
+      fetchFn: fixtureFetch(
+        [
+          {
+            status: 401,
+            body: { error: { code: 401, message: "Invalid Credentials", errors: [{ reason: "authError" }] } },
+          },
+          { status: 200, body: { items: [{ id: { videoId: "v1" }, snippet: { channelId: "c1" } }] } },
+        ],
+        seen,
+      ),
+    });
+    const result = await client.searchVideoIds("espresso");
+    expect(result.videoIds).toEqual(["v1"]);
+    // One refresh POST, two API attempts, second carries the new token.
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ grant_type: "refresh_token", refresh_token: "rt-1" });
+    expect(seen.map((record) => record.headers.Authorization)).toEqual([
+      "Bearer at-1",
+      "Bearer at-2",
+    ]);
+    // The retry must not double-charge: search.list cost 100 units once.
+    expect(readLedger(store, new Date()).used).toBe(100);
+  });
+
+  it("surfaces the error when the retry still gets a 401", async () => {
+    const store = kv();
+    const client = new YouTubeClient({
+      kv: store,
+      session: session(async () => ({
+        status: 200,
+        json: { access_token: "at-2", expires_in: 3600 },
+      })),
+      fetchFn: fixtureFetch(
+        [
+          {
+            status: 401,
+            body: { error: { code: 401, message: "Invalid Credentials", errors: [{ reason: "authError" }] } },
+          },
+          {
+            status: 401,
+            body: { error: { code: 401, message: "Invalid Credentials", errors: [{ reason: "authError" }] } },
+          },
+        ],
+        [],
+      ),
+    });
+    await expect(client.searchVideoIds("espresso")).rejects.toMatchObject({
+      name: "YouTubeApiError",
+      status: 401,
+      reason: "authError",
+    });
+  });
+
+  it("does not retry when the session cannot refresh (no client id)", async () => {
+    const store = kv();
+    const seen: Recorded[] = [];
+    const client = new YouTubeClient({
+      kv: store,
+      session: new OAuthSession({
+        tokens: freshTokens,
+        now: () => new Date("2026-11-18T11:00:00Z"),
+      }),
+      fetchFn: fixtureFetch(
+        [
+          {
+            status: 401,
+            body: { error: { code: 401, message: "Invalid Credentials", errors: [{ reason: "authError" }] } },
+          },
+        ],
+        seen,
+      ),
+    });
+    await expect(client.searchVideoIds("espresso")).rejects.toMatchObject({ status: 401 });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("maps refresh failures to a YouTubeApiError instead of leaking OAuth internals", async () => {
+    const store = kv();
+    const client = new YouTubeClient({
+      kv: store,
+      session: session(async () => ({
+        status: 400,
+        json: { error: "invalid_grant", error_description: "Token has been expired or revoked." },
+      })),
+      fetchFn: fixtureFetch(
+        [
+          {
+            status: 401,
+            body: { error: { code: 401, message: "Invalid Credentials", errors: [{ reason: "authError" }] } },
+          },
+        ],
+        [],
+      ),
+    });
+    await expect(client.searchVideoIds("espresso")).rejects.toMatchObject({
+      name: "YouTubeApiError",
+      status: 401,
+      reason: "authRefreshFailed",
+      message: /token refresh failed/,
+    });
+  });
+
+  it("proactively refreshes an almost-expired token before the request", async () => {
+    const store = kv();
+    const seen: Recorded[] = [];
+    const client = new YouTubeClient({
+      kv: store,
+      // 30s from expiry — inside the 60s proactive window.
+      session: session(
+        async () => ({ status: 200, json: { access_token: "at-2", expires_in: 3600 } }),
+        { ...freshTokens, expires_at: new Date("2026-11-18T11:00:30Z").toISOString() },
+      ),
+      fetchFn: fixtureFetch(
+        [{ status: 200, body: { items: [{ id: { videoId: "v1" }, snippet: { channelId: "c1" } }] } }],
+        seen,
+      ),
+    });
+    await client.searchVideoIds("espresso");
+    // The stored token was still 30s from expiry but inside the window.
+    expect(seen[0]?.headers.Authorization).toBe("Bearer at-2");
   });
 });

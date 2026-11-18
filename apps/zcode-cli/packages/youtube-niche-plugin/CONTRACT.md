@@ -12,7 +12,10 @@ YouTube 细分领域情报插件（MVP 第一阶段骨架）：`.zcode-plugin/pl
   依赖，运行时不读取 `node_modules`。
 - 数据落在插件私有数据目录（宿主经 manifest env 映射注入 `ZCODE_PLUGIN_DATA`；独立运行回退到
   `<cwd>/.youtube-niche`），不写工作区其他位置。
-- 阶段一工具集：`niche_add` / `niche_list` / `niche_remove`；频道关注、视频采集与排名在后续
-  阶段加入，数据库表已预留（channels、videos，随细分删除级联）。
-- 敏感凭据（未来的 Google OAuth 令牌）不得进入 `userConfig` 明文存储；令牌加密方案落地时更新
-  本契约（依据：环境就绪度报告 §3「插件侧 secret 存储」一节）。
+- 工具集：`niche_add` / `niche_list` / `niche_remove` / `niche_rank` / `niche_collect` /
+  `niche_videos` / `niche_export`（CSV/Markdown，落 `exports/` 子目录，文件名带 niche slug 与
+  分钟时间戳，重导出幂等）与 OAuth 对 `youtube_connect` / `youtube_connect_finish`。
+- 敏感凭据（Google OAuth 令牌）不进 `userConfig` 明文：AES-256-GCM 加密落盘于插件私有数据目录
+  （`tokens.json.enc`，密钥经 `YOUTUBE_NICHE_TOKEN_KEY` 注入，生产侧由宿主从 OS keychain 派生）。
+  访问令牌到期前 60s 窗口内或 API 返回 401 时自动经 refresh grant 轮换并回写加密存储；无
+  client id / refresh token 时降级为持有现令牌并让 401 如实上抛，绝不静默重连。

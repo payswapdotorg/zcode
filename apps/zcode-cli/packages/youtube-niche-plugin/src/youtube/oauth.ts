@@ -88,6 +88,38 @@ export type TokenPost = (
   body: Record<string, string>,
 ) => Promise<{ status: number; json: unknown }>;
 
+/** Production POST (form-encoded fetch); sessions and the flow share it. */
+export const fetchTokenPost: TokenPost = async (endpoint, body) => {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(body).toString(),
+  });
+  return { status: response.status, json: await response.json() };
+};
+
+function parseTokenResponse(
+  response: { status: number; json: unknown },
+  context: string,
+): TokenResponse {
+  const body = response.json as Record<string, unknown>;
+  if (response.status !== 200 || typeof body.error === "string") {
+    const detail =
+      typeof body.error_description === "string" ? `: ${body.error_description}` : "";
+    throw new OAuthError(`${context} failed (${response.status}) ${String(body.error ?? "")}${detail}`);
+  }
+  if (typeof body.access_token !== "string" || typeof body.expires_in !== "number") {
+    throw new OAuthError(`${context} response is missing access_token or expires_in`);
+  }
+  return {
+    access_token: body.access_token,
+    refresh_token: typeof body.refresh_token === "string" ? body.refresh_token : undefined,
+    expires_in: body.expires_in,
+    token_type: typeof body.token_type === "string" ? body.token_type : "Bearer",
+    scope: typeof body.scope === "string" ? body.scope : undefined,
+  };
+}
+
 export async function exchangeCode(
   post: TokenPost,
   params: { clientId: string; code: string; codeVerifier: string; redirectUri: string },
@@ -99,20 +131,22 @@ export async function exchangeCode(
     code_verifier: params.codeVerifier,
     redirect_uri: params.redirectUri,
   });
-  const body = response.json as Record<string, unknown>;
-  if (response.status !== 200 || typeof body.error === "string") {
-    const detail =
-      typeof body.error_description === "string" ? `: ${body.error_description}` : "";
-    throw new OAuthError(`token exchange failed (${response.status}) ${String(body.error ?? "")}${detail}`);
-  }
-  if (typeof body.access_token !== "string" || typeof body.expires_in !== "number") {
-    throw new OAuthError("token response is missing access_token or expires_in");
-  }
-  return {
-    access_token: body.access_token,
-    refresh_token: typeof body.refresh_token === "string" ? body.refresh_token : undefined,
-    expires_in: body.expires_in,
-    token_type: typeof body.token_type === "string" ? body.token_type : "Bearer",
-    scope: typeof body.scope === "string" ? body.scope : undefined,
-  };
+  return parseTokenResponse(response, "token exchange");
+}
+
+/**
+ * Refreshes an expired access token (grant_type=refresh_token). Google does
+ * not re-issue refresh tokens on this grant — the caller keeps the one it
+ * has. Only reachable through the injected `post`, like the exchange.
+ */
+export async function refreshAccessToken(
+  post: TokenPost,
+  params: { clientId: string; refreshToken: string },
+): Promise<TokenResponse> {
+  const response = await post(GOOGLE_TOKEN_ENDPOINT, {
+    grant_type: "refresh_token",
+    refresh_token: params.refreshToken,
+    client_id: params.clientId,
+  });
+  return parseTokenResponse(response, "token refresh");
 }

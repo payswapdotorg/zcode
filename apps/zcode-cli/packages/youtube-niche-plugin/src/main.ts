@@ -4,7 +4,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { openNicheDatabase, resolveNicheDataDir } from "#niche/db.ts";
 import { createNicheServer } from "#niche/server.ts";
 import { YouTubeClient } from "#niche/youtube/client.ts";
-import { loadTokens, tokenKeyFromEnv, type StoredTokens } from "#niche/youtube/token-store.ts";
+import { fetchTokenPost } from "#niche/youtube/oauth.ts";
+import { OAuthSession } from "#niche/youtube/oauth-session.ts";
+import { loadTokens, saveTokens, tokenKeyFromEnv, type StoredTokens } from "#niche/youtube/token-store.ts";
 
 // 官方插件宿主通过导出的 main 启动；导入时直接连接会被宿主判定为无效入口。
 export async function main(): Promise<void> {
@@ -40,7 +42,21 @@ export async function main(): Promise<void> {
             set: (key, value) => db.setMeta(key, value),
           },
           apiKey,
-          accessToken: tokens?.access_token,
+          // Stored tokens ride a rotating session: refresh inside the expiry
+          // window or on a 401 (needs YOUTUBE_CLIENT_ID), every rotation
+          // re-persisted to the encrypted store.
+          ...(tokens
+            ? {
+                session: new OAuthSession({
+                  ...(clientId ? { clientId } : {}),
+                  tokens,
+                  save: (next: StoredTokens) => {
+                    if (tokenKey) saveTokens(dataDir, tokenKey, next);
+                  },
+                  post: fetchTokenPost,
+                }),
+              }
+            : {}),
         })
       : undefined;
 

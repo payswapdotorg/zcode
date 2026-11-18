@@ -33,6 +33,14 @@ interface NicheVideosResult {
   };
 }
 
+interface NicheExportResult {
+  isError?: boolean;
+  structuredContent?: {
+    exported?: boolean;
+    path?: string;
+  };
+}
+
 /** Any tool result: only read structurally, never trust shape. */
 const authUrlOf = (result: unknown): string | null => {
   const structured = (result as { structuredContent?: Record<string, unknown> })
@@ -134,6 +142,31 @@ async function appendVideos(row: HTMLElement, name: string): Promise<void> {
       table.append(tr);
     }
     holder.append(table);
+    // CSV export of exactly what is collected; the click must not bubble
+    // into the row toggle that would collapse the detail view.
+    const exportBtn = document.createElement("button");
+    exportBtn.className = "export";
+    exportBtn.type = "button";
+    exportBtn.textContent = PANEL_TEXT.exportLabel;
+    exportBtn.onclick = (event) => {
+      event.stopPropagation();
+      void (async () => {
+        exportBtn.disabled = true;
+        try {
+          const result = (await app.callServerTool({
+            name: "niche_export",
+            arguments: { name, format: "csv" },
+          })) as NicheExportResult;
+          const structured = result.isError ? undefined : result.structuredContent;
+          exportBtn.textContent = structured?.exported
+            ? `${PANEL_TEXT.exportDone}: ${structured.path ?? ""}`
+            : PANEL_TEXT.exportFailed;
+        } catch {
+          exportBtn.textContent = PANEL_TEXT.exportFailed;
+        }
+      })();
+    };
+    holder.append(exportBtn);
   } catch {
     holder.replaceChildren();
     text(holder, "error", PANEL_TEXT.videosFailed);

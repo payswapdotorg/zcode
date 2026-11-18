@@ -10,6 +10,7 @@ import {
   SURFACE_ID,
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
+import { exportNiche } from "#niche/export.ts";
 import { describeRanking, rankVideos } from "#niche/ranking.ts";
 import {
   QuotaExceededError,
@@ -19,9 +20,10 @@ import {
 } from "#niche/youtube/client.ts";
 import type { QuotaKv } from "#niche/youtube/quota.ts";
 import { collectForNiche } from "#niche/youtube/collect.ts";
-import { OAuthError, type TokenPost } from "#niche/youtube/oauth.ts";
+import { fetchTokenPost, OAuthError, type TokenPost } from "#niche/youtube/oauth.ts";
 import { OAuthFlowError, startLoopbackFlow, type StartedFlow } from "#niche/youtube/oauth-flow.ts";
-import { loadTokens, saveTokens } from "#niche/youtube/token-store.ts";
+import { OAuthSession } from "#niche/youtube/oauth-session.ts";
+import { loadTokens, saveTokens, type StoredTokens } from "#niche/youtube/token-store.ts";
 
 /** Tool results leave the server well formed even if stored text is broken. */
 const textResult = (text: string, structuredContent?: Record<string, unknown>) => ({
@@ -64,14 +66,25 @@ export function createNicheServer({
     get: (key) => db.getMeta(key),
     set: (key, value) => db.setMeta(key, value),
   });
-  const defaultPost: TokenPost = async (endpoint, body) => {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(body).toString(),
+  const postImpl: TokenPost = post ?? fetchTokenPost;
+  /**
+   * OAuth-backed client with a rotating session: the token refreshes inside
+   * the expiry window or on a 401 and every rotation persists back to the
+   * encrypted store. Replacing the client (not reusing one built at startup)
+   * also heals a stale-token client after a reconnect.
+   */
+  const sessionClient = (tokens: StoredTokens): YouTubeClient =>
+    new YouTubeClient({
+      kv: kvForDb(),
+      session: new OAuthSession({
+        ...(clientId ? { clientId } : {}),
+        tokens,
+        ...(tokenKey && dataDir
+          ? { save: (next) => saveTokens(dataDir, tokenKey, next) }
+          : {}),
+        ...(post ? { post } : {}),
+      }),
     });
-    return { status: response.status, json: await response.json() };
-  };
   const storedTokens = () => {
     if (!tokenKey || !dataDir) return undefined;
     try {
@@ -271,6 +284,51 @@ export function createNicheServer({
   );
 
   server.registerTool(
+    "niche_export",
+    {
+      description:
+        "Export the videos collected for a niche to a CSV or Markdown file under the plugin's exports directory — ranked by the niche_rank score with views/day and engagement included. Offline: exports whatever is already collected.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(64),
+        format: z.enum(["csv", "markdown"]).default("csv"),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+      annotations: { readOnlyHint: false },
+      _meta: surfaceMeta,
+    },
+    async ({ name, format, limit }) => {
+      const niche = db.getNiche(name);
+      if (!niche)
+        return textResult(`Niche "${name}" is not tracked.`, { niche: name, exported: false });
+      if (!dataDir)
+        return textResult("Export needs the plugin data directory (host wiring).", {
+          niche: name,
+          exported: false,
+        });
+      const result = exportNiche({
+        db,
+        niche,
+        format,
+        ...(limit ? { limit } : {}),
+        dataDir,
+      });
+      if (!result.ok)
+        return textResult(result.reason, { niche: name, exported: false, reason: result.reason });
+      return textResult(
+        `Exported ${result.rows} videos for "${name}" to ${result.path} (${result.bytes} bytes, ${format === "csv" ? "CSV" : "Markdown"}).`,
+        {
+          niche: name,
+          exported: true,
+          path: result.path,
+          rows: result.rows,
+          bytes: result.bytes,
+          format,
+        },
+      );
+    },
+  );
+
+  server.registerTool(
     "youtube_connect",
     {
       description:
@@ -286,9 +344,14 @@ export function createNicheServer({
           { connected: false, configured: false },
         );
       const existing = storedTokens();
-      if (existing && Date.parse(existing.expires_at) > Date.now() + 60_000)
+      // Fresh token, or an expired one the session can refresh on its own.
+      if (
+        existing &&
+        (Date.parse(existing.expires_at) > Date.now() + 60_000 ||
+          (existing.refresh_token && clientId))
+      )
         return textResult(
-          `YouTube is already connected (access token expires ${existing.expires_at}). Re-run after expiry or clear the token store to reconnect.`,
+          `YouTube is already connected (access token expires ${existing.expires_at}${existing.refresh_token && clientId ? "; expired tokens refresh automatically" : ""}). Re-run after expiry or clear the token store to reconnect.`,
           { connected: true, expiresAt: existing.expires_at },
         );
       if (pending)
@@ -299,7 +362,7 @@ export function createNicheServer({
       try {
         pending = await startLoopbackFlow({
           clientId,
-          post: post ?? defaultPost,
+          post: postImpl,
         });
       } catch (error) {
         if (error instanceof OAuthFlowError)
@@ -341,10 +404,11 @@ export function createNicheServer({
       try {
         const tokens = await flow.result;
         saveTokens(dataDir, tokenKey, tokens);
-        if (!activeClient)
-          activeClient = new YouTubeClient({ kv: kvForDb(), accessToken: tokens.access_token });
+        // Always swap in a fresh session-backed client — reusing one built at
+        // startup would keep its (possibly stale) token forever.
+        activeClient = sessionClient(tokens);
         return textResult(
-          `YouTube connected — tokens stored encrypted (access token expires ${tokens.expires_at}). niche_collect is live.`,
+          `YouTube connected — tokens stored encrypted (access token expires ${tokens.expires_at}; refreshes automatically). niche_collect is live.`,
           { connected: true, expiresAt: tokens.expires_at },
         );
       } catch (error) {

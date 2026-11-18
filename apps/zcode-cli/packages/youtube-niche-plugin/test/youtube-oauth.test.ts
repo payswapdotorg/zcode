@@ -10,6 +10,8 @@ import {
   exchangeCode,
   loopbackRedirectUri,
   parseCallback,
+  refreshAccessToken,
+  type TokenPost,
 } from "#niche/youtube/oauth.ts";
 
 describe("PKCE", () => {
@@ -110,6 +112,45 @@ describe("exchangeCode", () => {
         code: "x",
         codeVerifier: "v",
         redirectUri: "http://127.0.0.1:1/callback",
+      }),
+    ).rejects.toThrow(OAuthError);
+  });
+});
+
+describe("refreshAccessToken", () => {
+  it("posts the refresh grant and parses the rotated token", async () => {
+    const bodies: Record<string, string>[] = [];
+    const post: TokenPost = async (endpoint, body) => {
+      expect(endpoint).toBe(GOOGLE_TOKEN_ENDPOINT);
+      bodies.push(body);
+      return {
+        status: 200,
+        json: { access_token: "at-2", expires_in: 3600, token_type: "Bearer" },
+      };
+    };
+    const tokens = await refreshAccessToken(post, { clientId: "client-1", refreshToken: "rt-1" });
+    expect(bodies[0]).toMatchObject({
+      grant_type: "refresh_token",
+      refresh_token: "rt-1",
+      client_id: "client-1",
+    });
+    expect(tokens).toEqual({ access_token: "at-2", expires_in: 3600, token_type: "Bearer" });
+  });
+
+  it("surfaces revoked grants and malformed responses", async () => {
+    await expect(
+      refreshAccessToken(
+        async () => ({
+          status: 400,
+          json: { error: "invalid_grant", error_description: "Token has been expired or revoked." },
+        }),
+        { clientId: "c", refreshToken: "rt" },
+      ),
+    ).rejects.toThrow(/token refresh failed \(400\) invalid_grant/);
+    await expect(
+      refreshAccessToken(async () => ({ status: 200, json: { token_type: "Bearer" } }), {
+        clientId: "c",
+        refreshToken: "rt",
       }),
     ).rejects.toThrow(OAuthError);
   });
