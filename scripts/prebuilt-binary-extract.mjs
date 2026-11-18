@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -35,18 +36,37 @@ function resolveTarArchiveArg(archivePath, cwd) {
   return toTarPosixPath(archivePath);
 }
 
+// Bugfix: 2026-11-18 起 GitHub windows 镜像滚动更新到 PowerShell 7.5（.NET 9），
+// Expand-Archive 内部的 [ZipFileExtensions]::ExtractToDirectory 三参重载解析失败
+// （MethodCountCouldNotFindBest），CI 打包步骤全红。改用系统自带 bsdtar
+// （System32\tar.exe，原生支持 zip）绕开 PowerShell；tar.exe 缺席时退回
+// .NET 两参 ExtractToDirectory（目标目录是新建临时目录，两参语义安全）。
+function extractZipOnWindows(archivePath, extractDir) {
+  const systemTar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  if (existsSync(systemTar)) {
+    runCommand(systemTar, [
+      "-xf",
+      toTarPosixPath(archivePath),
+      "-C",
+      toTarPosixPath(extractDir),
+    ]);
+    return;
+  }
+  runCommand("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('${archivePath.replaceAll("'", "''")}', '${extractDir.replaceAll("'", "''")}')`,
+  ]);
+}
+
 export function extractPrebuiltArchive({ archivePath, archiveExt, extractDir, cwd }) {
   mkdirSync(extractDir, { recursive: true });
   if (archiveExt === "zip") {
     if (process.platform === "win32") {
-      runCommand("powershell.exe", [
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${extractDir.replaceAll("'", "''")}' -Force`,
-      ]);
+      extractZipOnWindows(archivePath, extractDir);
       return;
     }
 
