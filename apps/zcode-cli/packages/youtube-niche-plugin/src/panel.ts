@@ -310,6 +310,29 @@ async function appendComparison(card: HTMLElement): Promise<void> {
       table.append(tr);
     }
     holder.append(table);
+    // CSV export of the comparison table, same surface as the per-niche export.
+    const exportBtn = document.createElement("button");
+    exportBtn.className = "export";
+    exportBtn.type = "button";
+    exportBtn.textContent = PANEL_TEXT.exportLabel;
+    exportBtn.onclick = () => {
+      void (async () => {
+        exportBtn.disabled = true;
+        try {
+          const result = (await app.callServerTool({
+            name: "niche_export_compare",
+            arguments: { format: "csv" },
+          })) as NicheExportResult;
+          const structured = result.isError ? undefined : result.structuredContent;
+          exportBtn.textContent = structured?.exported
+            ? `${PANEL_TEXT.exportDone}: ${structured.path ?? ""}`
+            : PANEL_TEXT.exportFailed;
+        } catch {
+          exportBtn.textContent = PANEL_TEXT.exportFailed;
+        }
+      })();
+    };
+    holder.append(exportBtn);
   } catch {
     section.remove();
   }

@@ -613,3 +613,55 @@ describe("niche_compare tool", () => {
     expect(structured?.comparison).toEqual([]);
   });
 });
+
+describe("niche_export_compare tool", () => {
+  it("exports the comparison to CSV in the data directory", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-compare-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({ name: "niche_export_compare", arguments: {} });
+    expect(textOf(result)).toContain("Exported 2 niches");
+    const structured = (
+      result as { structuredContent?: { exported?: boolean; path?: string } }
+    ).structuredContent;
+    expect(structured?.exported).toBe(true);
+    expect(structured?.path).toMatch(/exports\/niche-compare-\d{8}-\d{4}\.csv$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content.split("\n")[0]).toContain("accelerating");
+    expect(content).toContain("espresso");
+    expect(content).toContain("pour over");
+  });
+
+  it("refuses honestly below two niches", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-compare-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    db.addNiche("lonely");
+    const result = await client.callTool({ name: "niche_export_compare", arguments: {} });
+    expect(textOf(result)).toContain("at least 2 tracked niches (currently 1)");
+  });
+});

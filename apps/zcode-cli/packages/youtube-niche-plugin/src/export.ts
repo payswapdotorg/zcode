@@ -2,7 +2,15 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { NicheRecord } from "#niche/contract.ts";
 import type { NicheDatabase } from "#niche/db.ts";
-import { RANKING_WEIGHTS, rankVideos, type ScoredVideo } from "#niche/ranking.ts";
+import {
+  COMPARE_WEIGHTS,
+  RANKING_WEIGHTS,
+  compareNiches,
+  rankVideos,
+  type NicheComparison,
+  type NicheComparisonInput,
+  type ScoredVideo,
+} from "#niche/ranking.ts";
 
 /**
  * Offline export of a niche's collected videos to CSV (RFC 4180) or Markdown,
@@ -140,4 +148,124 @@ export function exportNiche(opts: {
   );
   writeFileSync(path, content, "utf8");
   return { ok: true, path, rows: ranked.length, bytes: Buffer.byteLength(content, "utf8") };
+}
+
+const COMPARE_CSV_COLUMNS = [
+  "rank",
+  "niche",
+  "video_count",
+  "total_views",
+  "views_per_day",
+  "engagement_rate",
+  "accelerating",
+  "steady",
+  "cooling",
+  "insufficient",
+  "heat",
+  "score",
+] as const;
+
+export function comparisonToCsv(comparison: readonly NicheComparison[]): string {
+  const lines = [COMPARE_CSV_COLUMNS.join(",")];
+  comparison.forEach((row, index) => {
+    lines.push(
+      [
+        index + 1,
+        row.niche.name,
+        row.videoCount,
+        row.totalViews,
+        Math.round(row.viewsPerDay),
+        row.engagementRate.toFixed(4),
+        row.accelerating,
+        row.steady,
+        row.cooling,
+        row.insufficient,
+        row.heat == null ? "" : row.heat.toFixed(4),
+        row.score.toFixed(4),
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+export function comparisonToMarkdown(
+  comparison: readonly NicheComparison[],
+  now: Date,
+): string {
+  const lines = [
+    "# Cross-niche comparison",
+    "",
+    `Exported ${now.toISOString()} · ${comparison.length} niches · score = ${COMPARE_WEIGHTS.velocity}·views/day avg + ${COMPARE_WEIGHTS.engagement}·engagement + ${COMPARE_WEIGHTS.momentum}·accelerating share (velocity/engagement normalized across niches)`,
+    "",
+    "| # | niche | videos | total views | views/day | engagement | ↗ | → | ↘ | — | heat | score |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|",
+  ];
+  comparison.forEach((row, index) => {
+    const cells = [
+      index + 1,
+      row.niche.name,
+      row.videoCount,
+      row.totalViews,
+      Math.round(row.viewsPerDay),
+      `${(row.engagementRate * 100).toFixed(1)}%`,
+      row.accelerating,
+      row.steady,
+      row.cooling,
+      row.insufficient,
+      row.heat == null ? "—" : row.heat.toFixed(2),
+      row.score.toFixed(4),
+    ].map(mdCell);
+    lines.push(`| ${cells.join(" | ")} |`);
+  });
+  const movers = comparison.filter((row) => row.topMover);
+  if (movers.length) {
+    lines.push("", "## Top movers", "");
+    for (const row of movers) {
+      const mover = row.topMover!;
+      lines.push(
+        `- **${row.niche.name}**: ${mover.title} (${mover.trend}${mover.ratio != null ? `, ${mover.ratio.toFixed(1)}×` : ""})`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Offline export of the cross-niche comparison (the niche_compare view) to CSV
+ * or Markdown. Needs at least two tracked niches — a one-niche comparison is
+ * meaningless; niches without collected videos still appear with honest zeros.
+ */
+export function exportComparison(opts: {
+  db: NicheDatabase;
+  format: ExportFormat;
+  limit?: number;
+  dataDir: string;
+  now?: Date;
+}): ExportResult {
+  const now = opts.now ?? new Date();
+  const niches = opts.db.listNiches();
+  if (niches.length < 2) {
+    return {
+      ok: false,
+      reason: `Comparison export needs at least 2 tracked niches (currently ${niches.length}); niche_add more niches first.`,
+    };
+  }
+  const inputs: NicheComparisonInput[] = niches.map((niche) => ({
+    niche,
+    videos: opts.db.listVideos(niche.id),
+    stats: opts.db.listVideoStats(niche.id),
+  }));
+  const comparison = compareNiches(inputs, now).slice(0, opts.limit ?? 20);
+  const content =
+    opts.format === "csv" ? comparisonToCsv(comparison) : comparisonToMarkdown(comparison, now);
+  const dir = join(opts.dataDir, "exports");
+  mkdirSync(dir, { recursive: true });
+  const path = join(
+    dir,
+    `niche-compare-${exportStamp(now)}.${opts.format === "csv" ? "csv" : "md"}`,
+  );
+  writeFileSync(path, content, "utf8");
+  return { ok: true, path, rows: comparison.length, bytes: Buffer.byteLength(content, "utf8") };
 }

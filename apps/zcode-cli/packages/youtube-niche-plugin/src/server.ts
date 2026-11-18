@@ -10,7 +10,7 @@ import {
   SURFACE_ID,
 } from "#niche/contract.ts";
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
-import { exportNiche } from "#niche/export.ts";
+import { exportComparison, exportNiche } from "#niche/export.ts";
 import {
   compareNiches,
   computeMomentum,
@@ -327,6 +327,44 @@ export function createNicheServer({
         `Exported ${result.rows} videos for "${name}" to ${result.path} (${result.bytes} bytes, ${format === "csv" ? "CSV" : "Markdown"}).`,
         {
           niche: name,
+          exported: true,
+          path: result.path,
+          rows: result.rows,
+          bytes: result.bytes,
+          format,
+        },
+      );
+    },
+  );
+
+  server.registerTool(
+    "niche_export_compare",
+    {
+      description:
+        "Export the cross-niche comparison (the niche_compare view) to a CSV or Markdown file under the plugin's exports directory — one row per niche with views/day, engagement, momentum counts, the accelerating share and the composite score, hottest first. Offline: exports whatever is already collected.",
+      inputSchema: {
+        format: z.enum(["csv", "markdown"]).default("csv"),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: false },
+      _meta: surfaceMeta,
+    },
+    async ({ format, limit }) => {
+      if (!dataDir)
+        return textResult("Export needs the plugin data directory (host wiring).", {
+          exported: false,
+        });
+      const result = exportComparison({
+        db,
+        format,
+        ...(limit ? { limit } : {}),
+        dataDir,
+      });
+      if (!result.ok)
+        return textResult(result.reason, { exported: false, reason: result.reason });
+      return textResult(
+        `Exported ${result.rows} niches to ${result.path} (${result.bytes} bytes, ${format === "csv" ? "CSV" : "Markdown"}).`,
+        {
           exported: true,
           path: result.path,
           rows: result.rows,

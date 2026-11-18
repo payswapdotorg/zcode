@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NicheRecord, VideoRecord } from "#niche/contract.ts";
 import { openNicheDatabase, type NicheDatabase } from "#niche/db.ts";
-import { exportNiche, slugifyNiche, toCsv, toMarkdown } from "#niche/export.ts";
+import { exportComparison, exportNiche, slugifyNiche, toCsv, toMarkdown } from "#niche/export.ts";
 import { rankVideos, type ScoredVideo } from "#niche/ranking.ts";
 
 const NOW = new Date("2026-11-18T11:00:00Z");
@@ -155,5 +155,120 @@ describe("exportNiche", () => {
       now: NOW,
     });
     expect(result).toMatchObject({ ok: true, rows: 2 });
+  });
+});
+
+describe("comparison export", () => {
+  const dirs: string[] = [];
+  const databases: NicheDatabase[] = [];
+  afterEach(() => {
+    for (const db of databases.splice(0)) db.close();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const openDb = (): { db: NicheDatabase; dataDir: string } => {
+    const dataDir = mkdtempSync(join(tmpdir(), "niche-compare-"));
+    dirs.push(dataDir);
+    const db = openNicheDatabase(dataDir);
+    databases.push(db);
+    return { db, dataDir };
+  };
+
+  /** "hot espresso" accelerating (two snapshots), "cold brew, iced" unclassified (one). */
+  const seed = (db: NicheDatabase): void => {
+    const hot = db.addNiche("hot espresso");
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 1000,
+        collected_at: "2026-11-15T00:00:00Z",
+      }),
+    );
+    db.addVideo(
+      hot.id,
+      video({
+        video_id: "h1",
+        title: "Hot one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 6000,
+        like_count: 300,
+        comment_count: 100,
+        collected_at: "2026-11-18T00:00:00Z",
+      }),
+    );
+    const cold = db.addNiche("cold brew, iced");
+    db.addVideo(
+      cold.id,
+      video({
+        video_id: "c1",
+        title: "Cold one",
+        published_at: "2026-11-08T00:00:00Z",
+        view_count: 3000,
+        like_count: 90,
+        comment_count: 30,
+        collected_at: "2026-11-18T00:00:00Z",
+      }),
+    );
+  };
+
+  it("writes a ranked comparison CSV with momentum counts and heat", () => {
+    const { db, dataDir } = openDb();
+    seed(db);
+    const result = exportComparison({ db, format: "csv", dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.path).toMatch(/exports\/niche-compare-20261118-1100\.csv$/);
+    expect(result.rows).toBe(2);
+    const content = readFileSync(result.path, "utf8");
+    expect(result.bytes).toBe(Buffer.byteLength(content, "utf8"));
+    expect(content.split("\n")[0]).toBe(
+      "rank,niche,video_count,total_views,views_per_day,engagement_rate,accelerating,steady,cooling,insufficient,heat,score",
+    );
+    // hot: 1 video, 6000 views, 1 accelerating, heat 1, composite 1.0.
+    expect(content).toContain("1,hot espresso,1,6000,");
+    expect(content).toContain("1,0,0,0,1.0000,1.0000");
+    // cold: nothing classified → empty heat cell; comma in the niche name is quoted.
+    expect(content).toContain('"cold brew, iced"');
+    expect(content).toContain("0,0,0,1,,0.3200");
+  });
+
+  it("writes a Markdown comparison with top movers", () => {
+    const { db, dataDir } = openDb();
+    seed(db);
+    const result = exportComparison({ db, format: "markdown", dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const content = readFileSync(result.path, "utf8");
+    expect(content).toContain("# Cross-niche comparison");
+    expect(content).toContain("| # | niche | videos | total views | views/day | engagement |");
+    expect(content).toContain("| 1 | hot espresso | 1 | 6000 |");
+    expect(content).toContain("## Top movers");
+    expect(content).toContain("- **hot espresso**: Hot one (accelerating, 2.9×)");
+    // Unclassified heat stays an em dash in the table.
+    expect(content).toContain("| — | 0.3200 |");
+  });
+
+  it("refuses honestly below two tracked niches", () => {
+    const { db, dataDir } = openDb();
+    db.addNiche("lonely");
+    const result = exportComparison({ db, format: "csv", dataDir, now: NOW });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok === false && result.reason).toMatch(/at least 2 tracked niches \(currently 1\)/);
+  });
+
+  it("respects the limit (hottest niches only)", () => {
+    const { db, dataDir } = openDb();
+    seed(db);
+    db.addNiche("third niche");
+    const result = exportComparison({ db, format: "csv", limit: 2, dataDir, now: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rows).toBe(2);
+    const content = readFileSync(result.path, "utf8");
+    expect(content).toContain("hot espresso");
+    expect(content).not.toContain("third niche");
   });
 });
