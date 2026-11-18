@@ -7,6 +7,7 @@ import {
 import {
   PANEL_TEXT,
   channelRows,
+  comparisonRows,
   formatQuota,
   nicheItems,
   rankedVideoRows,
@@ -257,6 +258,63 @@ async function appendChannels(holder: HTMLElement, name: string): Promise<void> 
   }
 }
 
+interface NicheCompareResult {
+  isError?: boolean;
+  structuredContent?: {
+    comparison?: ReadonlyArray<Record<string, unknown>>;
+  };
+}
+
+/**
+ * Cross-niche comparison block above the niche list. A bonus view: when the
+ * comparison call fails (or fewer than two niches answer), the block is
+ * removed instead of failing the whole panel.
+ */
+async function appendComparison(card: HTMLElement): Promise<void> {
+  const section = document.createElement("div");
+  section.className = "compare";
+  text(section, "channels-title", PANEL_TEXT.compareTitle);
+  const holder = document.createElement("div");
+  section.append(holder);
+  text(holder, "meta", "…");
+  card.append(section);
+  try {
+    const result = (await app.callServerTool({
+      name: "niche_compare",
+      arguments: { limit: 20 },
+    })) as NicheCompareResult;
+    const comparison = result.isError ? undefined : result.structuredContent?.comparison;
+    holder.replaceChildren();
+    if (!comparison || comparison.length < 2) {
+      section.remove();
+      return;
+    }
+    const table = document.createElement("table");
+    const head = document.createElement("tr");
+    for (const label of ["领域", "规模", "动量", "热度", "综合分"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      head.append(th);
+    }
+    table.append(head);
+    for (const row of comparisonRows(comparison)) {
+      const tr = document.createElement("tr");
+      for (const cell of [row.name, row.meta, row.momentum, row.heat]) {
+        const td = document.createElement("td");
+        td.textContent = cell;
+        tr.append(td);
+      }
+      const scoreCell = document.createElement("td");
+      scoreCell.append(scoreBar(row.barWidth));
+      tr.append(scoreCell);
+      table.append(tr);
+    }
+    holder.append(table);
+  } catch {
+    section.remove();
+  }
+}
+
 function renderNiches(niches: readonly NicheRecord[], quota: QuotaInfo | undefined): void {
   if (!root) return;
   root.replaceChildren();
@@ -267,6 +325,9 @@ function renderNiches(niches: readonly NicheRecord[], quota: QuotaInfo | undefin
   card.append(heading);
   renderAuthBanner(card);
   renderQuota(card, quota);
+  // The comparison needs at least two niches to be meaningful; it renders
+  // async beside the list so a slow call never blocks the items.
+  if (niches.length >= 2) void appendComparison(card);
   const items = nicheItems(niches);
   if (!items.length) {
     text(card, "empty", PANEL_TEXT.empty);

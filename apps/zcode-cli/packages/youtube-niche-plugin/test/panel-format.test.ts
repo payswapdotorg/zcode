@@ -3,6 +3,7 @@ import type { NicheRecord } from "#niche/contract.ts";
 import {
   PANEL_TEXT,
   channelRows,
+  comparisonRows,
   formatDate,
   formatNicheMeta,
   nicheItems,
@@ -126,5 +127,57 @@ describe("ranked view rows", () => {
     expect(rows[1]!.meta).toBe("0 视频 · 0 views");
     expect(rows[2]!.title).toBe("unknown");
     expect(PANEL_TEXT.channelsTitle).toContain("频道榜");
+  });
+});
+
+describe("comparisonRows", () => {
+  it("formats counts, heat and bars, omitting empty momentum buckets", () => {
+    const rows = comparisonRows([
+      {
+        niche: "espresso",
+        videoCount: 3,
+        totalViews: 12345,
+        accelerating: 2,
+        steady: 0,
+        cooling: 1,
+        insufficient: 0,
+        heat: 2 / 3,
+        score: 0.8,
+      },
+      {
+        niche: { name: "pour over" },
+        videoCount: 1,
+        totalViews: 500,
+        accelerating: 0,
+        steady: 0,
+        cooling: 0,
+        insufficient: 1,
+        heat: null,
+        score: 1.5,
+      },
+    ]);
+    expect(rows[0]).toEqual({
+      name: "espresso",
+      meta: "3 视频 · 12,345 views",
+      momentum: "2↗ 1↘",
+      heat: "热度 67%",
+      barWidth: "80%",
+    });
+    expect(rows[1]!.name).toBe("pour over");
+    expect(rows[1]!.momentum).toBe("1—");
+    expect(rows[1]!.heat).toBe("—");
+    expect(rows[1]!.barWidth).toBe("100%");
+    expect(PANEL_TEXT.compareTitle).toContain("跨领域对比");
+  });
+
+  it("keeps unknown shapes honest", () => {
+    const rows = comparisonRows([{}]);
+    expect(rows[0]).toEqual({
+      name: "",
+      meta: "0 视频 · 0 views",
+      momentum: "—",
+      heat: "—",
+      barWidth: "0%",
+    });
   });
 });

@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { NicheRecord, VideoRecord, VideoStatPoint } from "#niche/contract.ts";
 import {
   RANKING_WEIGHTS,
+  compareNiches,
   computeMomentum,
   daysSince,
   describeChannelRanking,
+  describeNicheComparison,
   describeRanking,
   describeTrends,
   engagementRate,
@@ -268,5 +270,158 @@ describe("momentum", () => {
     expect(text).toContain("1 accelerating · 1 steady · 1 cooling · 0 insufficient");
     expect(text).toContain("1. Hot — accelerating: lifetime 10/day → recent 38/day (3.8×)");
     expect(describeTrends(niche, [])).toContain("No videos collected");
+  });
+});
+
+describe("compareNiches", () => {
+  const at = (daysAgo: number) => new Date(NOW.getTime() - daysAgo * DAY).toISOString();
+  const record = (id: number, name: string): NicheRecord => ({
+    id,
+    name,
+    notes: "",
+    created_at: "2026-11-01T00:00:00.000Z",
+    channel_count: 0,
+    video_count: 0,
+  });
+
+  it("returns an empty batch and an honest empty description", () => {
+    expect(compareNiches([], NOW)).toEqual([]);
+    expect(describeNicheComparison([])).toContain("No niches tracked yet");
+  });
+
+  it("blends velocity, engagement and the accelerating share", () => {
+    const hot = compareNiches(
+      [
+        {
+          niche: record(1, "hot niche"),
+          videos: [
+            video({
+              video_id: "h1",
+              title: "Hot one",
+              view_count: 6000,
+              like_count: 300,
+              comment_count: 100,
+              published_at: at(10),
+            }),
+          ],
+          stats: [
+            { video_id: "h1", snapshot_at: at(3), view_count: 1000, like_count: null, comment_count: null },
+            { video_id: "h1", snapshot_at: at(0), view_count: 6000, like_count: 400, comment_count: null },
+          ],
+        },
+        {
+          niche: record(2, "mild niche"),
+          videos: [
+            video({
+              video_id: "m1",
+              title: "Mild one",
+              view_count: 3000,
+              like_count: 90,
+              comment_count: 30,
+              published_at: at(10),
+            }),
+          ],
+          stats: [{ video_id: "m1", snapshot_at: at(0), view_count: 3000, like_count: 90, comment_count: 30 }],
+        },
+      ],
+      NOW,
+    );
+    expect(hot.map((row) => row.niche.name)).toEqual(["hot niche", "mild niche"]);
+    // hot: vpd 600/day (norm 1), engagement 6.7% (norm 1), 1/1 accelerating → 0.4+0.2+0.4.
+    expect(hot[0]!.score).toBeCloseTo(1);
+    // mild: vpd 300/day (norm 0.5), engagement 4% (norm 0.6), nothing classified → 0.2+0.12.
+    expect(hot[1]!.score).toBeCloseTo(0.32);
+    expect(hot[0]!.heat).toBe(1);
+    expect(hot[0]!.topMover).toMatchObject({ title: "Hot one", trend: "accelerating" });
+    expect(hot[1]!.heat).toBeNull();
+    expect(hot[1]!.topMover).toBeNull();
+    expect(hot[0]!.reasons).toContain("1/1 accelerating");
+    expect(hot[1]!.reasons).toContain("momentum needs ≥2 collections ≥1 day apart");
+  });
+
+  it("keeps a niche without collected videos honest and last", () => {
+    const rows = compareNiches(
+      [
+        { niche: record(1, "bare"), videos: [], stats: [] },
+        {
+          niche: record(2, "full"),
+          videos: [
+            video({ video_id: "f1", view_count: 5000, like_count: 200, comment_count: 50, published_at: at(5) }),
+          ],
+          stats: [],
+        },
+      ],
+      NOW,
+    );
+    expect(rows[0]!.niche.name).toBe("full");
+    const bare = rows[rows.length - 1]!;
+    expect(bare.niche.name).toBe("bare");
+    expect(bare.videoCount).toBe(0);
+    expect(bare.heat).toBeNull();
+    expect(bare.score).toBe(0);
+    expect(bare.reasons).toContain("no videos collected");
+  });
+
+  it("breaks score ties by niche name for determinism", () => {
+    const shared = video({
+      video_id: "s1",
+      view_count: 4000,
+      like_count: 100,
+      comment_count: 20,
+      published_at: at(4),
+    });
+    const rows = compareNiches(
+      [
+        { niche: record(1, "zeta"), videos: [shared], stats: [] },
+        { niche: record(2, "alpha"), videos: [shared], stats: [] },
+      ],
+      NOW,
+    );
+    expect(rows.map((row) => row.niche.name)).toEqual(["alpha", "zeta"]);
+    expect(rows[0]!.score).toBeCloseTo(rows[1]!.score);
+  });
+
+  it("describes the comparison with weights, scores and top movers", () => {
+    const rows = compareNiches(
+      [
+        {
+          niche: record(1, "hot niche"),
+          videos: [
+            video({
+              video_id: "h1",
+              title: "Hot one",
+              view_count: 6000,
+              like_count: 300,
+              comment_count: 100,
+              published_at: at(10),
+            }),
+          ],
+          stats: [
+            { video_id: "h1", snapshot_at: at(3), view_count: 1000, like_count: null, comment_count: null },
+            { video_id: "h1", snapshot_at: at(0), view_count: 6000, like_count: 400, comment_count: null },
+          ],
+        },
+        {
+          niche: record(2, "mild niche"),
+          videos: [
+            video({
+              video_id: "m1",
+              title: "Mild one",
+              view_count: 3000,
+              like_count: 90,
+              comment_count: 30,
+              published_at: at(10),
+            }),
+          ],
+          stats: [],
+        },
+      ],
+      NOW,
+    );
+    const text = describeNicheComparison(rows);
+    expect(text).toContain("Niche comparison (score = 0.4·views/day avg + 0.2·engagement + 0.4·accelerating share");
+    expect(text).toContain("1. hot niche — score 1.00:");
+    expect(text).toContain("top: Hot one");
+    expect(text).toContain("momentum needs ≥2 collections ≥1 day apart");
   });
 });

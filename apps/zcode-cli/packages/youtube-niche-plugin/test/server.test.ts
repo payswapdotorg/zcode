@@ -548,3 +548,68 @@ describe("niche_trends tool", () => {
     expect(textOf(result)).toContain("is not tracked");
   });
 });
+
+describe("niche_compare tool", () => {
+  it("ranks the hottest niche first with heat and top mover", async () => {
+    const { client, db } = await connect();
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({ name: "niche_compare", arguments: {} });
+    const text = textOf(result);
+    expect(text).toContain("Niche comparison");
+    expect(text).toContain("espresso");
+    expect(text).toContain("pour over");
+    const structured = (
+      result as {
+        structuredContent?: {
+          comparison?: Array<{
+            niche?: string;
+            heat?: number | null;
+            score?: number;
+            topMover?: { title: string };
+          }>;
+        };
+      }
+    ).structuredContent;
+    expect(structured?.comparison?.[0]).toMatchObject({ niche: "espresso" });
+    expect(structured?.comparison?.[0]!.heat).toBe(1);
+    expect(structured?.comparison?.[0]!.topMover).toMatchObject({ title: "Heating up" });
+    expect(structured?.comparison?.[1]).toMatchObject({ niche: "pour over" });
+    expect(structured?.comparison?.[1]!.heat).toBeNull();
+    expect(structured?.comparison?.[1]!.topMover).toBeUndefined();
+    expect(structured?.comparison?.[0]!.score).toBeGreaterThan(
+      structured?.comparison?.[1]!.score ?? 0,
+    );
+  });
+
+  it("reports an empty comparison honestly", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({ name: "niche_compare", arguments: {} });
+    expect(textOf(result)).toContain("No niches tracked yet");
+    const structured = (result as { structuredContent?: { comparison?: unknown[] } })
+      .structuredContent;
+    expect(structured?.comparison).toEqual([]);
+  });
+});

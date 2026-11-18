@@ -12,8 +12,10 @@ import {
 import { NicheExistsError, type NicheDatabase } from "#niche/db.ts";
 import { exportNiche } from "#niche/export.ts";
 import {
+  compareNiches,
   computeMomentum,
   describeChannelRanking,
+  describeNicheComparison,
   describeRanking,
   describeTrends,
   rankChannels,
@@ -388,6 +390,43 @@ export function createNicheServer({
           lifetimeVpd: row.lifetimeVpd,
           recentVpd: row.recentVpd,
           ratio: row.ratio,
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "niche_compare",
+    {
+      description:
+        "Compare every tracked niche in one batch — mean views/day and engagement are normalized across niches and blended with the accelerating share of classified videos (40%·velocity + 20%·engagement + 40%·momentum), hottest first. Offline: pure aggregation over what is already collected, no extra API calls.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true },
+      _meta: surfaceMeta,
+    },
+    async ({ limit }) => {
+      const inputs = db.listNiches().map((niche) => ({
+        niche,
+        videos: db.listVideos(niche.id),
+        stats: db.listVideoStats(niche.id),
+      }));
+      const comparison = compareNiches(inputs, new Date()).slice(0, limit ?? 20);
+      return textResult(describeNicheComparison(comparison), {
+        comparison: comparison.map((row) => ({
+          niche: row.niche.name,
+          videoCount: row.videoCount,
+          totalViews: row.totalViews,
+          viewsPerDay: row.viewsPerDay,
+          engagementRate: row.engagementRate,
+          accelerating: row.accelerating,
+          steady: row.steady,
+          cooling: row.cooling,
+          insufficient: row.insufficient,
+          heat: row.heat,
+          score: row.score,
+          ...(row.topMover ? { topMover: row.topMover } : {}),
         })),
       });
     },

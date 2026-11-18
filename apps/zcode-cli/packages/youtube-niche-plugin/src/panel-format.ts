@@ -15,6 +15,7 @@ export const PANEL_TEXT = {
   videosEmpty: "该领域还没有采集到视频（等待 R2 后由 niche_collect 填充）。",
   videosFailed: "视频明细加载失败",
   channelsTitle: "频道榜 · Channel leaders",
+  compareTitle: "跨领域对比 · Niche comparison",
   exportLabel: "导出 CSV",
   exportDone: "已导出",
   exportFailed: "导出失败",
@@ -111,6 +112,57 @@ export function channelRows(
     meta: `${Number(channel.videoCount) || 0} 视频 · ${(Number(channel.totalViews) || 0).toLocaleString("en-US")} views`,
     barWidth: scoreBarWidth(Number(channel.score) || 0),
   }));
+}
+
+export interface ComparisonRow {
+  name: string;
+  meta: string;
+  momentum: string;
+  heat: string;
+  barWidth: string;
+}
+
+/**
+ * Rows for the cross-niche comparison table (niche_compare structured
+ * output, read structurally): zero momentum buckets are omitted, heat stays
+ * "—" until a video classifies.
+ */
+export function comparisonRows(
+  comparison: ReadonlyArray<{
+    niche?: unknown;
+    videoCount?: unknown;
+    totalViews?: unknown;
+    accelerating?: unknown;
+    steady?: unknown;
+    cooling?: unknown;
+    insufficient?: unknown;
+    heat?: unknown;
+    score?: unknown;
+  }>,
+): ComparisonRow[] {
+  return comparison.map((row) => {
+    const name =
+      typeof row.niche === "string"
+        ? row.niche
+        : String((row.niche as { name?: unknown } | null)?.name ?? "");
+    const counts: ReadonlyArray<readonly [number, string]> = [
+      [Number(row.accelerating) || 0, "↗"],
+      [Number(row.steady) || 0, "→"],
+      [Number(row.cooling) || 0, "↘"],
+      [Number(row.insufficient) || 0, "—"],
+    ];
+    const parts = counts
+      .filter(([count]) => count > 0)
+      .map(([count, glyph]) => `${count}${glyph}`);
+    const heat = Number(row.heat);
+    return {
+      name,
+      meta: `${Number(row.videoCount) || 0} 视频 · ${(Number(row.totalViews) || 0).toLocaleString("en-US")} views`,
+      momentum: parts.length ? parts.join(" ") : "—",
+      heat: Number.isFinite(heat) && row.heat != null ? `热度 ${Math.round(heat * 100)}%` : "—",
+      barWidth: scoreBarWidth(Number(row.score) || 0),
+    };
+  });
 }
 
 export function formatDate(iso: string): string {

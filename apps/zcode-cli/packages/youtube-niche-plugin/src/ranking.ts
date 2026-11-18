@@ -251,3 +251,127 @@ export function describeTrends(niche: NicheRecord, momentum: readonly VideoMomen
   );
   return [header, ...lines].join("\n");
 }
+
+/** Cross-niche comparison weights: the momentum share counts as much as velocity. */
+export const COMPARE_WEIGHTS = { velocity: 0.4, engagement: 0.2, momentum: 0.4 } as const;
+
+export interface NicheComparison {
+  niche: NicheRecord;
+  videoCount: number;
+  totalViews: number;
+  /** Mean per-video views/day (videos without view data excluded; 0 when none). */
+  viewsPerDay: number;
+  /** (Σ likes + Σ comments) / Σ views across the niche's videos (0 without views). */
+  engagementRate: number;
+  accelerating: number;
+  steady: number;
+  cooling: number;
+  insufficient: number;
+  /** accelerating / (accelerating + steady + cooling); null until a video classifies. */
+  heat: number | null;
+  /** 0..1 composite within the compared batch (momentum term is absolute, not normalized). */
+  score: number;
+  /** Highest-momentum classified video of the niche, when one exists. */
+  topMover: { title: string; trend: TrendClassification; ratio: number | null } | null;
+  reasons: string[];
+}
+
+export interface NicheComparisonInput {
+  niche: NicheRecord;
+  videos: readonly VideoRecord[];
+  stats: readonly VideoStatPoint[];
+}
+
+/**
+ * Compares every tracked niche in one batch. Mean velocity and engagement are
+ * normalized across niches like rankVideos, but the momentum term uses the
+ * absolute accelerating share: two niches that are both fully accelerating
+ * both earn the full term instead of being forced apart.
+ */
+export function compareNiches(
+  inputs: readonly NicheComparisonInput[],
+  now: Date,
+): NicheComparison[] {
+  const rows = inputs.map((input) => {
+    const withViews = input.videos.filter((video) => (video.view_count ?? 0) > 0);
+    const totalViews = input.videos.reduce((sum, video) => sum + (video.view_count ?? 0), 0);
+    const totalLikes = input.videos.reduce((sum, video) => sum + (video.like_count ?? 0), 0);
+    const totalComments = input.videos.reduce(
+      (sum, video) => sum + (video.comment_count ?? 0),
+      0,
+    );
+    const vpdMean =
+      withViews.length > 0
+        ? withViews.reduce((sum, video) => sum + (viewsPerDay(video, now) ?? 0), 0) /
+          withViews.length
+        : 0;
+    const engagement = totalViews > 0 ? (totalLikes + totalComments) / totalViews : 0;
+    const momentum = computeMomentum(input.videos, input.stats, now);
+    const accelerating = momentum.filter((row) => row.trend === "accelerating").length;
+    const steady = momentum.filter((row) => row.trend === "steady").length;
+    const cooling = momentum.filter((row) => row.trend === "cooling").length;
+    const classified = accelerating + steady + cooling;
+    const top = momentum.find((row) => row.trend !== "insufficient") ?? null;
+    return {
+      input,
+      videoCount: input.videos.length,
+      totalViews,
+      viewsPerDay: vpdMean,
+      engagementRate: engagement,
+      accelerating,
+      steady,
+      cooling,
+      insufficient: momentum.length - classified,
+      heat: classified > 0 ? accelerating / classified : null,
+      topMover: top ? { title: top.video.title, trend: top.trend, ratio: top.ratio } : null,
+    };
+  });
+  const vpdMax = Math.max(0, ...rows.map((row) => row.viewsPerDay));
+  const engMax = Math.max(0, ...rows.map((row) => row.engagementRate));
+  return rows
+    .map((row) => {
+      const reasons: string[] = [];
+      if (row.videoCount === 0) {
+        reasons.push("no videos collected");
+      } else {
+        reasons.push(`${Math.round(row.viewsPerDay).toLocaleString("en-US")} views/day avg`);
+        reasons.push(`${(row.engagementRate * 100).toFixed(1)}% engagement`);
+        reasons.push(
+          row.heat == null
+            ? "momentum needs ≥2 collections ≥1 day apart"
+            : `${row.accelerating}/${row.accelerating + row.steady + row.cooling} accelerating`,
+        );
+      }
+      return {
+        niche: row.input.niche,
+        videoCount: row.videoCount,
+        totalViews: row.totalViews,
+        viewsPerDay: row.viewsPerDay,
+        engagementRate: row.engagementRate,
+        accelerating: row.accelerating,
+        steady: row.steady,
+        cooling: row.cooling,
+        insufficient: row.insufficient,
+        heat: row.heat,
+        score:
+          COMPARE_WEIGHTS.velocity * (vpdMax > 0 ? row.viewsPerDay / vpdMax : 0) +
+          COMPARE_WEIGHTS.engagement * (engMax > 0 ? row.engagementRate / engMax : 0) +
+          COMPARE_WEIGHTS.momentum * (row.heat ?? 0),
+        topMover: row.topMover,
+        reasons,
+      };
+    })
+    .sort((a, b) => b.score - a.score || a.niche.name.localeCompare(b.niche.name));
+}
+
+/** Model-facing cross-niche comparison: one line per niche, hottest first. */
+export function describeNicheComparison(comparison: readonly NicheComparison[]): string {
+  if (!comparison.length)
+    return "No niches tracked yet; the comparison appears once niches are tracked.";
+  const header = `Niche comparison (score = ${COMPARE_WEIGHTS.velocity}·views/day avg + ${COMPARE_WEIGHTS.engagement}·engagement + ${COMPARE_WEIGHTS.momentum}·accelerating share, normalized):`;
+  const lines = comparison.map(
+    (row, index) =>
+      `${index + 1}. ${row.niche.name} — score ${row.score.toFixed(2)}: ${row.reasons.join(" · ")}${row.topMover ? ` · top: ${row.topMover.title}` : ""}`,
+  );
+  return [header, ...lines].join("\n");
+}
