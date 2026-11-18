@@ -17,6 +17,12 @@ test("Windows builds both supported architectures with the matching MSVC target"
   ]);
   assert.throws(() => resolveRuntimeHostBuild("ia32", "win32"), /architecture/);
 });
+test("ZCODE_CMAKE_GENERATOR swaps the MSVC generator for newer VS runners", () => {
+  assert.deepEqual(
+    resolveRuntimeHostBuild("x64", "win32", undefined, "Visual Studio 18 2026").configureArgs,
+    ["-G", "Visual Studio 18 2026", "-A", "x64"],
+  );
+});
 test("cross builds explicitly select a Windows compiler", () => {
   assert.ok(
     resolveRuntimeHostBuild("x64", "linux").configureArgs.includes("-DCMAKE_SYSTEM_NAME=Windows"),

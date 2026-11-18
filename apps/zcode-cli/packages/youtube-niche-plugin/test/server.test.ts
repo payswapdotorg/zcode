@@ -1,0 +1,684 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { PANEL_URI } from "#niche/contract.ts";
+import { YouTubeClient, type FetchLike } from "#niche/youtube/client.ts";
+import { quotaDayKey } from "#niche/youtube/quota.ts";
+import type { TokenPost } from "#niche/youtube/oauth.ts";
+import { loadTokens } from "#niche/youtube/token-store.ts";
+import { makeConnect } from "./support/connect.ts";
+
+const closers: (() => Promise<void>)[] = [];
+const dirs: string[] = [];
+afterEach(async () => {
+  for (const close of closers.splice(0)) await close();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+const connect = makeConnect(closers, dirs);
+
+const fixtureFetch: FetchLike = (() => {
+  const responses = [
+    {
+      status: 200,
+      body: { items: [{ id: { videoId: "v1" }, snippet: { channelId: "c1" } }] },
+    },
+    {
+      status: 200,
+      body: {
+        items: [
+          {
+            id: "v1",
+            snippet: { title: "Espresso 101", channelId: "c1", publishedAt: "2026-11-10T00:00:00Z" },
+            statistics: { viewCount: "5000", likeCount: "200", commentCount: "50" },
+            contentDetails: { duration: "PT8M" },
+          },
+        ],
+      },
+    },
+    {
+      status: 200,
+      body: { items: [{ id: "c1", snippet: { title: "Channel One" } }] },
+    },
+  ];
+  let index = 0;
+  return async () => {
+    const response = responses[Math.min(index++, responses.length - 1)]!;
+    return { status: response.status, json: async () => response.body };
+  };
+})();
+
+const textOf = (result: unknown): string => {
+  const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+  return content
+    .map((part) => (part.type === "text" ? part.text ?? "" : ""))
+    .join("\n");
+};
+
+describe("youtube-niche server", () => {
+  it("serves the Niche Explorer panel resource", async () => {
+    const { client } = await connect();
+    const resource = await client.readResource({ uri: PANEL_URI });
+    const [first] = resource.contents as Array<{ uri: string; text?: string; mimeType?: string }>;
+    expect(first?.mimeType).toBe("text/html");
+    expect(first?.text).toContain("Niche Explorer");
+  });
+
+  it("adds, lists and removes niches through tools", async () => {
+    const { client } = await connect();
+    const added = await client.callTool({
+      name: "niche_add",
+      arguments: { name: "budget home espresso", notes: "gear" },
+    });
+    expect(textOf(added)).toContain("budget home espresso");
+
+    const duplicate = await client.callTool({
+      name: "niche_add",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(duplicate)).toContain("already tracked");
+
+    const listed = await client.callTool({ name: "niche_list", arguments: {} });
+    expect(textOf(listed)).toContain("budget home espresso");
+    expect(textOf(listed)).toContain("channels: 0");
+
+    const removed = await client.callTool({
+      name: "niche_remove",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(removed)).toContain("Removed");
+
+    const empty = await client.callTool({ name: "niche_list", arguments: {} });
+    expect(textOf(empty)).toContain("No niches tracked yet");
+  });
+
+  it("ranks collected videos of a niche", async () => {
+    const { client, db } = await connect();
+    const niche = db.addNiche("budget home espresso");
+    const day = 24 * 60 * 60 * 1000;
+    db.addVideo(niche.id, {
+      video_id: "slow",
+      title: "Slow burner",
+      channel_id: "c1",
+      published_at: new Date(Date.now() - 10 * day).toISOString(),
+      view_count: 10000,
+      like_count: 100,
+      comment_count: 0,
+      duration_seconds: null,
+      collected_at: new Date().toISOString(),
+    });
+    db.addVideo(niche.id, {
+      video_id: "fast",
+      title: "Fast riser",
+      channel_id: "c2",
+      published_at: new Date(Date.now() - 2 * day).toISOString(),
+      view_count: 6000,
+      like_count: 300,
+      comment_count: 100,
+      duration_seconds: null,
+      collected_at: new Date().toISOString(),
+    });
+
+    const ranked = await client.callTool({
+      name: "niche_rank",
+      arguments: { name: "budget home espresso" },
+    });
+    const text = textOf(ranked);
+    expect(text).toContain("1. Fast riser");
+    expect(text).toContain("2. Slow burner");
+    expect(text).toContain("(fast)");
+
+    const untracked = await client.callTool({ name: "niche_rank", arguments: { name: "nope" } });
+    expect(textOf(untracked)).toContain("not tracked");
+
+    const fresh = await connect();
+    fresh.db.addNiche("empty niche");
+    const noVideos = await fresh.client.callTool({
+      name: "niche_rank",
+      arguments: { name: "empty niche" },
+    });
+    expect(textOf(noVideos)).toContain("No videos collected");
+  });
+
+  it("reports an honest not-configured state for niche_collect without credentials", async () => {
+    const { client } = await connect();
+    const added = await client.callTool({
+      name: "niche_add",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(added)).toContain("budget home espresso");
+
+    const result = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "budget home espresso" },
+    });
+    expect(textOf(result)).toContain("not configured");
+    expect(textOf(result)).toContain("R2");
+
+    const untracked = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("not tracked");
+  });
+
+  it("collects videos through an injected YouTube client", async () => {
+    const map = new Map<string, string>();
+    const youtube = new YouTubeClient({
+      kv: { get: (key) => map.get(key), set: (key, value) => void map.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: fixtureFetch,
+    });
+    const { client, db } = await connect({ youtube });
+    db.addNiche("budget home espresso");
+
+    const result = await client.callTool({
+      name: "niche_collect",
+      arguments: { name: "budget home espresso" },
+    });
+    const text = textOf(result);
+    expect(text).toContain("Collected 1 new-or-refreshed videos");
+    expect(text).toContain("quota: 102/10000");
+
+    const niche = db.getNiche("budget home espresso")!;
+    const videos = db.listVideos(niche.id);
+    expect(videos).toHaveLength(1);
+    expect(videos[0]!.title).toBe("Espresso 101");
+    expect(videos[0]!.view_count).toBe(5000);
+  });
+
+  it("lists collected videos and reports quota in niche_list", async () => {
+    // Preset the ledger with the day key it itself uses (Pacific day, not UTC).
+    const map = new Map<string, string>([
+      ["youtube_quota_day", quotaDayKey(new Date())],
+      ["youtube_quota_used", "250"],
+    ]);
+    const youtube = new YouTubeClient({
+      kv: { get: (key) => map.get(key), set: (key, value) => void map.set(key, value) },
+      apiKey: "test-key",
+      fetchFn: fixtureFetch,
+    });
+    const { client, db } = await connect({ youtube });
+    const niche = db.addNiche("budget home espresso");
+    db.addVideo(niche.id, {
+      video_id: "v1",
+      title: "Espresso 101",
+      channel_id: "c1",
+      published_at: "2026-11-10T00:00:00Z",
+      view_count: 5000,
+      like_count: 200,
+      comment_count: 50,
+      duration_seconds: 480,
+      collected_at: new Date().toISOString(),
+    });
+
+    const listed = await client.callTool({ name: "niche_list", arguments: {} });
+    const quota = (listed as { structuredContent?: { quota?: { used: number } } })
+      .structuredContent?.quota;
+    expect(quota?.used).toBe(250);
+
+    const videos = await client.callTool({
+      name: "niche_videos",
+      arguments: { name: "budget home espresso" },
+    });
+    const text = textOf(videos);
+    expect(text).toContain("1. Espresso 101");
+    expect(text).toContain("5000 views");
+    expect(text).toContain("8 min");
+
+    const untracked = await client.callTool({
+      name: "niche_videos",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("not tracked");
+
+    const empty = await connect({ youtube });
+    const emptyNiche = empty.db.addNiche("empty niche");
+    expect(emptyNiche.video_count).toBe(0);
+    const noVideos = await empty.client.callTool({
+      name: "niche_videos",
+      arguments: { name: "empty niche" },
+    });
+    expect(textOf(noVideos)).toContain("No videos collected");
+  });
+
+  it("reports an honest unconfigured state for youtube_connect", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({ name: "youtube_connect", arguments: {} });
+    expect(textOf(result)).toContain("not configured");
+    expect(textOf(result)).toContain("R2");
+
+    const finish = await client.callTool({ name: "youtube_connect_finish", arguments: {} });
+    expect(textOf(finish)).toContain("No consent flow is pending");
+  });
+
+  it("runs the two-step connect flow and stores encrypted tokens", async () => {
+    const tokenKey = randomBytes(32);
+    const dataDir = mkdtempSync(join(tmpdir(), "youtube-niche-tokens-"));
+    dirs.push(dataDir);
+    const post: TokenPost = async () => ({
+      status: 200,
+      json: {
+        access_token: "at-1",
+        refresh_token: "rt-1",
+        expires_in: 3600,
+        token_type: "Bearer",
+      },
+    });
+    const { client } = await connect({ tokenKey, dataDir, clientId: "cid", post });
+
+    const started = await client.callTool({ name: "youtube_connect", arguments: {} });
+    const structured = (started as {
+      structuredContent?: { authUrl?: string; port?: number; state?: string };
+    }).structuredContent;
+    expect(textOf(started)).toContain("Consent flow started");
+    expect(structured?.authUrl).toContain("accounts.google.com");
+
+    const state = structured!.state!;
+    const port = structured!.port!;
+    const response = await fetch(`http://127.0.0.1:${port}/callback?code=ac-1&state=${state}`);
+    expect(response.status).toBe(200);
+
+    const finished = await client.callTool({ name: "youtube_connect_finish", arguments: {} });
+    expect(textOf(finished)).toContain("YouTube connected");
+    expect(textOf(finished)).toContain("niche_collect is live");
+
+    // Round-trip: the stored file decrypts with the same key.
+    const tokens = loadTokens(dataDir, tokenKey);
+    expect(tokens?.access_token).toBe("at-1");
+    expect(tokens?.refresh_token).toBe("rt-1");
+
+    // After connecting, niche_list carries the quota of the OAuth client.
+    const listed = await client.callTool({ name: "niche_list", arguments: {} });
+    const quota = (listed as { structuredContent?: { quota?: { limit: number } } })
+      .structuredContent?.quota;
+    expect(quota?.limit).toBe(10000);
+
+    // A second connect while tokens are valid reports the existing session.
+    const again = await client.callTool({ name: "youtube_connect", arguments: {} });
+    expect(textOf(again)).toContain("already connected");
+  });
+});
+
+describe("niche_export tool", () => {
+  it("exports collected videos to CSV in the data directory", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const added = db.addNiche("budget home espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "Espresso, \"ranked\"",
+      channel_id: "c1",
+      published_at: "2026-11-11T00:00:00Z",
+      view_count: 5000,
+      like_count: 200,
+      comment_count: 50,
+      duration_seconds: 480,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "budget home espresso", format: "csv" },
+    });
+    expect(textOf(result)).toContain("Exported 1 videos");
+    const structured = (result as { structuredContent?: { path?: string } }).structuredContent;
+    expect(structured?.path).toMatch(/exports\/niche-budget-home-espresso-\d{8}-\d{4}\.csv$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content).toContain('"Espresso, ""ranked"""');
+    expect(content.split("\n")[0]).toContain("views_per_day");
+  });
+
+  it("exports Markdown with the niche heading", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "V1",
+      channel_id: "c1",
+      published_at: "2026-11-11T00:00:00Z",
+      view_count: 100,
+      like_count: 5,
+      comment_count: 1,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "espresso", format: "markdown" },
+    });
+    const structured = (result as { structuredContent?: { path?: string } }).structuredContent;
+    expect(structured?.path).toMatch(/\.md$/);
+    expect(readFileSync(structured!.path!, "utf8")).toContain("# espresso — collected videos");
+  });
+
+  it("refuses unknown niches and niches without collected videos honestly", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-export-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const untracked = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "nope", format: "csv" },
+    });
+    expect(textOf(untracked)).toContain("is not tracked");
+    db.addNiche("empty");
+    const empty = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "empty", format: "csv" },
+    });
+    expect(textOf(empty)).toContain("No videos collected");
+  });
+
+  it("reports missing host wiring instead of writing nowhere", async () => {
+    const { client, db } = await connect();
+    db.addNiche("any");
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "any", format: "csv" },
+    });
+    expect(textOf(result)).toContain("data directory");
+  });
+});
+
+describe("niche_channels tool", () => {
+  it("ranks channels with joined titles from the channels table", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addChannel(added.id, "c1", "Channel One");
+    db.addChannel(added.id, "c2", "Channel Two");
+    const video = (videoId: string, channelId: string, viewCount: number, likeCount: number) =>
+      db.addVideo(added.id, {
+        video_id: videoId,
+        title: `V ${videoId}`,
+        channel_id: channelId,
+        published_at: "2026-11-07T00:00:00Z",
+        view_count: viewCount,
+        like_count: likeCount,
+        comment_count: 0,
+        duration_seconds: 60,
+        collected_at: "2026-11-17T00:00:00Z",
+      });
+    video("a", "c1", 10000, 500);
+    video("b", "c1", 5000, 100);
+    video("c", "c2", 100, 50);
+    const result = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("Channel leaders for \"espresso\"");
+    expect(textOf(result)).toContain("1. Channel One —");
+    const structured = (result as {
+      structuredContent?: { channels?: Array<{ title?: string; channelId?: string; videoCount?: number }> };
+    }).structuredContent;
+    expect(structured?.channels?.[0]).toMatchObject({
+      channelId: "c1",
+      title: "Channel One",
+      videoCount: 2,
+    });
+  });
+
+  it("falls back to channel ids when no title was collected", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "V1",
+      channel_id: "raw-id",
+      published_at: "2026-11-07T00:00:00Z",
+      view_count: 100,
+      like_count: 1,
+      comment_count: 0,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("(raw-id)");
+  });
+
+  it("refuses unknown niches and empty niches honestly", async () => {
+    const { client, db } = await connect();
+    const untracked = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(untracked)).toContain("is not tracked");
+    db.addNiche("empty");
+    const empty = await client.callTool({
+      name: "niche_channels",
+      arguments: { name: "empty" },
+    });
+    expect(textOf(empty)).toContain("No videos collected");
+  });
+});
+
+describe("niche_trends tool", () => {
+  it("reports accelerating momentum from two collections", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    const base = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(added.id, { ...base, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(added.id, { ...base, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "espresso" },
+    });
+    const text = textOf(result);
+    expect(text).toContain("Trend report for \"espresso\"");
+    expect(text).toContain("1 accelerating · 0 steady · 0 cooling · 0 insufficient");
+    expect(text).toContain("1. Heating up — accelerating:");
+    const structured = (result as {
+      structuredContent?: { trends?: Array<{ video_id: string; trend: string; ratio?: number }> };
+    }).structuredContent;
+    expect(structured?.trends?.[0]).toMatchObject({ video_id: "v1", trend: "accelerating" });
+    expect(structured?.trends?.[0]!.ratio).toBeGreaterThan(1.3);
+  });
+
+  it("reports insufficient honestly after a single collection", async () => {
+    const { client, db } = await connect();
+    const added = db.addNiche("espresso");
+    db.addVideo(added.id, {
+      video_id: "v1",
+      title: "Fresh",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      view_count: 500,
+      like_count: 0,
+      comment_count: 0,
+      duration_seconds: 60,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "espresso" },
+    });
+    expect(textOf(result)).toContain("0 accelerating · 0 steady · 0 cooling · 1 insufficient");
+    expect(textOf(result)).toContain("needs ≥2 collections ≥1 day apart");
+  });
+
+  it("refuses unknown niches", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({
+      name: "niche_trends",
+      arguments: { name: "nope" },
+    });
+    expect(textOf(result)).toContain("is not tracked");
+  });
+});
+
+describe("niche_compare tool", () => {
+  it("ranks the hottest niche first with heat and top mover", async () => {
+    const { client, db } = await connect();
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({ name: "niche_compare", arguments: {} });
+    const text = textOf(result);
+    expect(text).toContain("Niche comparison");
+    expect(text).toContain("espresso");
+    expect(text).toContain("pour over");
+    const structured = (
+      result as {
+        structuredContent?: {
+          comparison?: Array<{
+            niche?: string;
+            heat?: number | null;
+            score?: number;
+            topMover?: { title: string };
+          }>;
+        };
+      }
+    ).structuredContent;
+    expect(structured?.comparison?.[0]).toMatchObject({ niche: "espresso" });
+    expect(structured?.comparison?.[0]!.heat).toBe(1);
+    expect(structured?.comparison?.[0]!.topMover).toMatchObject({ title: "Heating up" });
+    expect(structured?.comparison?.[1]).toMatchObject({ niche: "pour over" });
+    expect(structured?.comparison?.[1]!.heat).toBeNull();
+    expect(structured?.comparison?.[1]!.topMover).toBeUndefined();
+    expect(structured?.comparison?.[0]!.score).toBeGreaterThan(
+      structured?.comparison?.[1]!.score ?? 0,
+    );
+  });
+
+  it("reports an empty comparison honestly", async () => {
+    const { client } = await connect();
+    const result = await client.callTool({ name: "niche_compare", arguments: {} });
+    expect(textOf(result)).toContain("No niches tracked yet");
+    const structured = (result as { structuredContent?: { comparison?: unknown[] } })
+      .structuredContent;
+    expect(structured?.comparison).toEqual([]);
+  });
+});
+
+describe("niche_export_compare tool", () => {
+  it("exports the comparison to CSV in the data directory", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-compare-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({ name: "niche_export_compare", arguments: {} });
+    expect(textOf(result)).toContain("Exported 2 niches");
+    const structured = (
+      result as { structuredContent?: { exported?: boolean; path?: string } }
+    ).structuredContent;
+    expect(structured?.exported).toBe(true);
+    expect(structured?.path).toMatch(/exports\/niche-compare-\d{8}-\d{4}\.csv$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content.split("\n")[0]).toContain("accelerating");
+    expect(content).toContain("espresso");
+    expect(content).toContain("pour over");
+  });
+
+  it("refuses honestly below two niches", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-compare-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    db.addNiche("lonely");
+    const result = await client.callTool({ name: "niche_export_compare", arguments: {} });
+    expect(textOf(result)).toContain("at least 2 tracked niches (currently 1)");
+  });
+
+  it("exports a full Markdown report with the cross-niche position", async () => {
+    const exportDir = mkdtempSync(join(tmpdir(), "niche-report-tool-"));
+    dirs.push(exportDir);
+    const { client, db } = await connect({ dataDir: exportDir });
+    const espresso = db.addNiche("espresso");
+    const heating = {
+      video_id: "v1",
+      title: "Heating up",
+      channel_id: "c1",
+      published_at: "2026-11-01T00:00:00Z",
+      like_count: 10,
+      comment_count: 1,
+      duration_seconds: 60,
+    };
+    db.addVideo(espresso.id, { ...heating, view_count: 1000, collected_at: "2026-11-07T00:00:00Z" });
+    db.addVideo(espresso.id, { ...heating, view_count: 10000, collected_at: "2026-11-17T00:00:00Z" });
+    const pour = db.addNiche("pour over");
+    db.addVideo(pour.id, {
+      video_id: "p1",
+      title: "Slow drip",
+      channel_id: "c2",
+      published_at: "2026-11-15T00:00:00Z",
+      view_count: 500,
+      like_count: 50,
+      comment_count: 10,
+      duration_seconds: 600,
+      collected_at: "2026-11-17T00:00:00Z",
+    });
+    const result = await client.callTool({
+      name: "niche_export",
+      arguments: { name: "espresso", format: "report" },
+    });
+    expect(textOf(result)).toContain("Exported 1 videos");
+    expect(textOf(result)).toContain("Markdown report");
+    const structured = (
+      result as { structuredContent?: { path?: string; format?: string } }
+    ).structuredContent;
+    expect(structured?.format).toBe("report");
+    expect(structured?.path).toMatch(/exports\/niche-espresso-report-\d{8}-\d{4}\.md$/);
+    const content = readFileSync(structured!.path!, "utf8");
+    expect(content).toContain("# espresso — niche report");
+    expect(content).toContain("## Momentum");
+    expect(content).toContain("## Top channels");
+    expect(content).toContain("**#1 of 2** tracked niches by composite score");
+  });
+});

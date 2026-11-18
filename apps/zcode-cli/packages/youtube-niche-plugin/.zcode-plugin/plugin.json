@@ -1,0 +1,41 @@
+{
+  "name": "youtube-niche",
+  "version": "0.1.0",
+  "description": "YouTube niche intelligence: track niches, follow channels, collect and rank videos for content planning.",
+  "description_i18n": {
+    "en-US": "YouTube niche intelligence: track niches, follow channels, collect and rank videos for content planning.",
+    "zh-CN": "YouTube 细分领域情报：细分领域追踪、频道关注、视频采集与排名，服务内容选题。"
+  },
+  "author": {
+    "name": "PaySwap"
+  },
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "youtube-niche": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${ZCODE_PLUGIN_ROOT}/dist/server.mjs"],
+      "cwd": "${ZCODE_PROJECT_DIR}",
+      "env": {
+        "ZCODE_WORKSPACE_ROOT": "${ZCODE_PROJECT_DIR}",
+        "YOUTUBE_NICHE_PLUGIN_DATA": "${ZCODE_PLUGIN_DATA}"
+      },
+      "isolation": "workspace"
+    }
+  },
+  "ui": {
+    "surfaces": [
+      {
+        "id": "niche-explorer",
+        "title": {
+          "zh-CN": "细分领域探索",
+          "en-US": "Niche Explorer"
+        },
+        "icon": "globe",
+        "server": "youtube-niche",
+        "resourceUri": "ui://youtube-niche/panel.html",
+        "availability": "session"
+      }
+    ]
+  }
+}

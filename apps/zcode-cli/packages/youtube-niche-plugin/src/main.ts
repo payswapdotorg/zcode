@@ -1,0 +1,96 @@
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { openNicheDatabase, resolveNicheDataDir } from "#niche/db.ts";
+import { createNicheServer } from "#niche/server.ts";
+import { YouTubeClient } from "#niche/youtube/client.ts";
+import { fetchTokenPost } from "#niche/youtube/oauth.ts";
+import { OAuthSession } from "#niche/youtube/oauth-session.ts";
+import { loadTokens, saveTokens, tokenKeyFromEnv, type StoredTokens } from "#niche/youtube/token-store.ts";
+
+// 官方插件宿主通过导出的 main 启动；导入时直接连接会被宿主判定为无效入口。
+export async function main(): Promise<void> {
+  const dist = dirname(fileURLToPath(import.meta.url));
+  const assetRoot = join(dist, "ui");
+  const dataDir = resolveNicheDataDir(process.env, process.cwd());
+  const db = openNicheDatabase(dataDir);
+
+  // The YouTube client exists only when credentials do (R2): an API key for
+  // simple access, or OAuth tokens from the encrypted store. A tampered token
+  // file or malformed key degrades to "not configured" instead of crashing.
+  let tokenKey: Buffer | undefined;
+  try {
+    tokenKey = tokenKeyFromEnv(process.env);
+  } catch (error) {
+    console.error(`youtube-niche: ignoring token key: ${String(error)}`);
+  }
+  let tokens: StoredTokens | undefined;
+  if (tokenKey) {
+    try {
+      tokens = loadTokens(dataDir, tokenKey);
+    } catch (error) {
+      console.error(`youtube-niche: ignoring token store: ${String(error)}`);
+    }
+  }
+  const apiKey = process.env.YOUTUBE_API_KEY?.trim() || undefined;
+  const clientId = process.env.YOUTUBE_CLIENT_ID?.trim() || undefined;
+  const youtube =
+    apiKey || tokens?.access_token
+      ? new YouTubeClient({
+          kv: {
+            get: (key) => db.getMeta(key),
+            set: (key, value) => db.setMeta(key, value),
+          },
+          apiKey,
+          // Stored tokens ride a rotating session: refresh inside the expiry
+          // window or on a 401 (needs YOUTUBE_CLIENT_ID), every rotation
+          // re-persisted to the encrypted store.
+          ...(tokens
+            ? {
+                session: new OAuthSession({
+                  ...(clientId ? { clientId } : {}),
+                  tokens,
+                  save: (next: StoredTokens) => {
+                    if (tokenKey) saveTokens(dataDir, tokenKey, next);
+                  },
+                  post: fetchTokenPost,
+                }),
+              }
+            : {}),
+        })
+      : undefined;
+
+  const server = createNicheServer({
+    db,
+    assetRoot,
+    youtube,
+    ...(tokenKey ? { tokenKey } : {}),
+    dataDir,
+    ...(clientId ? { clientId } : {}),
+    // Opt-in hands-off collection: it spends YouTube quota on a timer, so the
+    // user enables it explicitly. Scheduled exports are free local writes and
+    // stay on by default.
+    ...(process.env.YOUTUBE_NICHE_PLUGIN_SCHEDULED_COLLECT === "1"
+      ? { collectionScheduler: {} }
+      : {}),
+  });
+  let stopping = false;
+  async function close() {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await server.close();
+    } finally {
+      db.close();
+    }
+  }
+  process.once("SIGTERM", () => void close().catch(() => {}));
+  process.once("SIGINT", () => void close().catch(() => {}));
+  process.stdin.once("end", () => void close().catch(() => {}));
+  await server.connect(new StdioServerTransport());
+}
+
+// 保留独立 Node 进程直接启动的用法。
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await main();
+}

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu:
+    name: ubuntu / install / typecheck / tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The default Node heap aborts during the full-monorepo typecheck
+      # (environment-readiness report P11/P12; fork fix F2 accommodation).
+      - name: Typecheck (heap-capped)
+        run: pnpm typecheck
+        env:
+          NODE_OPTIONS: --max-old-space-size=3000
+
+      # Production builds (vite renderer/web) exceed the 4 GiB TL container and
+      # must run here (readiness report P8–P10); several engineering test files
+      # also import built package dists (@zcode/e2e-report, @zcode/contracts).
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Engineering tests
+        run: pnpm test:engineering
+
+      - name: youtube-niche plugin tests
+        run: pnpm --filter @zcode/youtube-niche-plugin test
+
+      - name: youtube-niche plugin build
+        run: pnpm --filter @zcode/youtube-niche-plugin build
+
+  windows-bundle:
+    name: windows / NSIS x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Native cmake/MSVC path on windows-latest: no mingw cross-compile needed
+      # (the blocker this job removes for the Linux TL container, P13/P21).
+      # windows-latest = windows-2025-vs2026 (VS 18 2026); the scripts default
+      # to the VS 17 2022 generator of local dev boxes, so override it here.
+      - name: Bundle Windows x64 installer (NSIS)
+        run: pnpm bundle:desktop -- --os win --arch x64
+        env:
+          ZCODE_CMAKE_GENERATOR: Visual Studio 18 2026
+
+      - name: SHA256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path packages/desktop/dist -Filter *.exe
+          if (-not $files) { throw "no installer found in packages/desktop/dist" }
+          $lines = foreach ($f in $files) {
+            "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())  $($f.Name)"
+          }
+          $lines | Out-File -Encoding ascii packages/desktop/dist/SHA256SUMS
+          Get-Content packages/desktop/dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-x64
+          if-no-files-found: error
+          path: |
+            packages/desktop/dist/*.exe
+            packages/desktop/dist/SHA256SUMS
